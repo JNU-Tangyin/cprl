@@ -205,3 +205,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+time_series_library/time_series_library/dataset/electricity/electricity.csv
+time_series_library/time_series_library/dataset/traffic/traffic.csv
