@@ -1,35 +1,52 @@
-from src.conformal_prediction import ConformalPredictionConfig, AdaptiveConformalPredictor
-from src.cem import CEMConfig  # 按你实际路径改（你 cem.py 在哪就从哪 import）
+# src/base_conformal/acp_ours.py
+
+from src.conformal_prediction_ import ConformalPredictionConfig, AdaptiveConformalPredictor
 
 
 def build_acp_ours(args) -> AdaptiveConformalPredictor:
-    # 允许命令行覆写 CEM 超参数（如果你还没加 args，就用默认）
-    cem_cfg = CEMConfig(
-        alpha_min=float(getattr(args, "cem_alpha_min", 0.01)),
-        alpha_max=float(getattr(args, "cem_alpha_max", 0.5)),
-        pop_size=int(getattr(args, "cem_pop_size", 20)),
-        elite_frac=float(getattr(args, "cem_elite_frac", 0.2)),
-        init_std=float(getattr(args, "cem_init_std", 0.05)),
-        min_std=float(getattr(args, "cem_min_std", 0.01)),
-        smooth=float(getattr(args, "cem_smooth", 0.7)),
-        n_iters=int(getattr(args, "cem_n_iters", 1)),
-    )
-
-    config = ConformalPredictionConfig(
+    cfg = ConformalPredictionConfig(
+        # ===== base =====
         initial_alpha=float(getattr(args, "alpha", 0.1)),
-        window_size=int(getattr(args, "spectral_window", 64)),
-        n_latent_states=int(getattr(args, "n_latent_states", 3)),
+        window_size=int(getattr(args, "spectral_window", getattr(args, "window_size", 64))),
 
-        cem_config=cem_cfg,
+        # ===== regime discovery =====
+        max_regimes=int(getattr(args, "max_regimes", 8)),
+        new_regime_threshold=float(getattr(args, "new_regime_threshold", 2.2)),
+        new_regime_patience=int(getattr(args, "new_regime_patience", 3)),
+        sticky_bonus=float(getattr(args, "sticky_bonus", 0.5)),
+        min_state_duration=int(getattr(args, "min_state_duration", 5)),
+        ewma_beta=float(getattr(args, "ewma_beta", 0.94)),
+        jump_q=float(getattr(args, "jump_q", 0.95)),
+        feature_ema=float(getattr(args, "feature_ema", 0.05)),
 
+        # ===== buffers / windows =====
         calib_window_size=int(getattr(args, "calib_window_size", 200)),
-        lambda_spectral=float(getattr(args, "lambda_spectral", 0.5)),
         min_calib_size=int(getattr(args, "min_calib_size", 30)),
+        min_regime_calib_size=int(getattr(args, "min_regime_calib_size", 50)),
+        min_regime_eval_size=int(getattr(args, "min_regime_eval_size", 30)),
+        min_regime_cov_size=int(getattr(args, "min_regime_cov_size", 30)),
 
-        # 你 strict CEM 新加的参数：建议也透出
         eval_window_size=int(getattr(args, "eval_window_size", 100)),
         coverage_window=int(getattr(args, "coverage_window", 50)),
         lambda_cov=float(getattr(args, "lambda_cov", 5.0)),
+
+        # ===== spectral =====
+        lambda_spectral=float(getattr(args, "lambda_spectral", 0.5)),
+
+        # ===== k refresh =====
+        k_update_every=int(getattr(args, "k_update_every", 20)),
+        k_min=float(getattr(args, "k_min", 1e-3)),
+        k_max=float(getattr(args, "k_max", 100.0)),
+        k_fallback=float(getattr(args, "k_fallback", 1.0)),
+
+        # ===== CEM (新版：直接写在 config 上) =====
+        alpha_min=float(getattr(args, "cem_alpha_min", getattr(args, "alpha_min", 0.01))),
+        alpha_max=float(getattr(args, "cem_alpha_max", getattr(args, "alpha_max", 0.3))),
+        cem_pop=int(getattr(args, "cem_pop", getattr(args, "cem_pop_size", 16))),
+        cem_elite_frac=float(getattr(args, "cem_elite_frac", 0.25)),
+        cem_noise=float(getattr(args, "cem_noise", getattr(args, "cem_init_std", 0.02))),
+        cem_lr=float(getattr(args, "cem_lr", getattr(args, "cem_smooth", 0.3))),
+        cem_n_iters=int(getattr(args, "cem_n_iters", 3)),
     )
 
-    return AdaptiveConformalPredictor(config=config)
+    return AdaptiveConformalPredictor(config=cfg)
