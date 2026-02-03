@@ -1,61 +1,128 @@
 import csv
 import os
 import pandas as pd
-from datetime import datetime
+from typing import Dict, Optional
+
 
 class ResultLogger:
-    def __init__(self, csv_path="results/conformal_results.csv"):
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        self.csv_path = csv_path
 
-        # 如果文件不存在，写入表头
+    CONFORMAL_HEADER = [
+        "setting",
+        "cp_mode",
+        "target_coverage",
+        "coverage",
+        "coverage_gap",
+        "avg_width",
+        "ces",
+        "rcs",
+        "point_mse",
+        "point_mae",
+        "comment",
+    ]
+
+    ADAPTIVE_HEADER = [
+        "setting",
+        "cp_mode",
+        "target_coverage",
+        "worst_window_coverage",
+        "width_step_mean",
+        "width_std",
+        "control_alpha_step_mean",
+        "control_alpha_std",
+        "comment",
+    ]
+
+    def __init__(
+        self,
+        conformal_csv_path: str = "results/conformal_results.csv",
+        adaptive_csv_path: str = "results/adaptive_conformal_results.csv",
+    ):
+        self.conformal_csv_path = conformal_csv_path
+        self.adaptive_csv_path = adaptive_csv_path
+
+        os.makedirs(os.path.dirname(self.conformal_csv_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.adaptive_csv_path), exist_ok=True)
+
+        self._ensure_header(self.conformal_csv_path, self.CONFORMAL_HEADER)
+        self._ensure_header(self.adaptive_csv_path, self.ADAPTIVE_HEADER)
+
+    @staticmethod
+    def _ensure_header(csv_path: str, header: list):
         if not os.path.exists(csv_path):
             with open(csv_path, mode="w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "timestamp",
-                    "setting",
-                    "mse",
-                    "mae",
-                    "coverage",
-                    "avg_width",
-                    "final_alpha",
-                    "calib_mse",
-                    "data_path",
-                    "cp_mode",
-                    "comment",
-                ])
+                writer.writerow(header)
 
-    def log(self, setting: str, metrics: dict, extra_info: dict = None):
-        """追加一行实验结果到 CSV"""
-        extra_info = extra_info or {}
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        row = [
-            timestamp,
-            setting,
-            metrics.get("mse"),
-            metrics.get("mae"),
-            metrics.get("coverage"),
-            metrics.get("avg_width"),
-            metrics.get("final_alpha"),
-            metrics.get("calib_mse"),
-            extra_info.get("data_path"),
-            extra_info.get("cp_mode"),
-            extra_info.get("comment", ""),
-        ]
-
-        with open(self.csv_path, mode="a", newline="") as f:
+    @staticmethod
+    def _append_row(csv_path: str, header: list, row_dict: Dict):
+        row = [row_dict.get(col, None) for col in header]
+        with open(csv_path, mode="a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(row)
 
+
+    def log_conformal(
+        self,
+        setting: str,
+        cp_mode: str,
+        target_coverage: float,
+        metrics: Dict,
+        comment: str = "",
+    ):
+
+        row = {
+            "setting": setting,
+            "cp_mode": cp_mode,
+            "target_coverage": target_coverage,
+            "coverage": metrics.get("coverage"),
+            "coverage_gap": metrics.get("coverage_gap"),
+            "avg_width": metrics.get("avg_width"),
+            "ces": metrics.get("ces"),
+            "rcs": metrics.get("rcs"),
+            "point_mse": metrics.get("point_mse"),
+            "point_mae": metrics.get("point_mae"),
+            "comment": comment,
+        }
+        self._append_row(self.conformal_csv_path, self.CONFORMAL_HEADER, row)
+
+    def log_adaptive(
+        self,
+        setting: str,
+        cp_mode: str,
+        target_coverage: float,
+        adaptive_metrics: Dict,
+        comment: str = "",
+    ):
+
+        row = {
+            "setting": setting,
+            "cp_mode": cp_mode,
+            "target_coverage": target_coverage,
+            "worst_window_coverage": adaptive_metrics.get("worst_window_coverage"),
+            "width_step_mean": adaptive_metrics.get("width_step_mean"),
+            "width_std": adaptive_metrics.get("width_std"),
+            "control_alpha_step_mean": adaptive_metrics.get("control_alpha_step_mean"),
+            "control_alpha_std": adaptive_metrics.get("control_alpha_std"),
+            "comment": comment,
+        }
+        self._append_row(self.adaptive_csv_path, self.ADAPTIVE_HEADER, row)
+
     def save(self):
-        """为了兼容 exp_conformal.py，这里其实什么都不用做"""
+        """Compatibility hook (no-op)."""
         pass
 
     def to_excel(self):
-        """将 CSV 转为 Excel 文件"""
-        df = pd.read_csv(self.csv_path)
-        excel_path = self.csv_path.replace(".csv", ".xlsx")
-        df.to_excel(excel_path, index=False)
-        return excel_path
+
+        out = {}
+
+        df1 = pd.read_csv(self.conformal_csv_path)
+        xlsx1 = self.conformal_csv_path.replace(".csv", ".xlsx")
+        df1.to_excel(xlsx1, index=False)
+        out["conformal"] = xlsx1
+
+        df2 = pd.read_csv(self.adaptive_csv_path)
+        xlsx2 = self.adaptive_csv_path.replace(".csv", ".xlsx")
+        df2.to_excel(xlsx2, index=False)
+        out["adaptive"] = xlsx2
+
+        return out
