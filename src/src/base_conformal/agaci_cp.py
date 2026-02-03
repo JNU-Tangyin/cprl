@@ -1,15 +1,19 @@
 # src/base_conformal/agaci_cp.py
+from __future__ import annotations
+
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
-from .aci_cp import ACICP  
+from .aci_cp import ACICP
+
+Number = Union[int, float]
 
 
 def pinball_loss(y: float, q: float, beta: float) -> float:
     """
-    论文里用于 AgACI 的 pinball loss ρ_β（quantile regression 常用）:
-      ρ_β(u) = β*u - min(u, 0), 其中 u = y - q
+    Pinball loss:
+      ρ_β(u) = β*u - min(u, 0), where u = y - q.
     """
     u = float(y - q)
     return float(beta * u - min(u, 0.0))
@@ -21,36 +25,51 @@ class AgACIConfig:
     gammas: Tuple[float, ...] = (0.001, 0.01, 0.05, 0.1)
     warmup_steps: int = 50
 
-    # ACI(每个专家)内部参数（沿用你的 ACICP）
-    split_size: float = 0.75
-    t_init: int = 200
-    max_iter: int = 500
-    seed: int = 0
+    # ---- expert (time-series ACI) params ----
+    T0: int = 500
+    min_calib_size: int = 30
+    warm_start: int = 50
+    fallback_width: float = 3.0
+    clip_alpha: bool = False
+    eps: float = 1e-6
 
+    # ---- bounded thresholding domain (only applied to finite expert outputs) ----
     M_lower: float = -1e9
-    M_upper: float =  1e9
+    M_upper: float = 1e9
 
-    # 聚合器（BOA-style）数值稳定参数
-    eps: float = 1e-12
+    # ---- BOA stability ----
+    agg_eps: float = 1e-12
     clip_eta_max: float = 50.0
+    loss_clip: float = 1e6
+    eta_floor: float = 1e-8
+
+    seed: int = 0
 
 
 class _BOAStyleAggregator:
     """
-    BOA-style 在线聚合器（用于 lower 或 upper 一边）：BOA-like（二阶自适应）实现，核心目标：
-      - 用 pinball loss 更新专家权重
-      - 权重依赖历史损失（类似 Bernstein/second-order）
+    BOA-style second-order online aggregation (one side: lower OR upper).
+    Updates weights with centered losses to improve stability.
     """
-    def __init__(self, n_experts: int, eps: float = 1e-12, clip_eta_max: float = 50.0):
+    def __init__(
+        self,
+        n_experts: int,
+        eps: float = 1e-12,
+        clip_eta_max: float = 50.0,
+        loss_clip: float = 1e6,
+        eta_floor: float = 1e-8,
+    ):
         self.K = int(n_experts)
         self.eps = float(eps)
         self.clip_eta_max = float(clip_eta_max)
+        self.loss_clip = float(loss_clip)
+        self.eta_floor = float(eta_floor)
 
-        self.w = np.full(self.K, 1.0 / self.K, dtype=float)  # weights (probabilities)
-        self.cum_sq = np.zeros(self.K, dtype=float)           # sum of squared centered losses
-        self.cum_l = np.zeros(self.K, dtype=float)            # cumulated "l-values" (BOA-like)
-        self.max_abs = np.zeros(self.K, dtype=float)          # track max abs loss for bounding
-        self.eta = np.zeros(self.K, dtype=float)              # adaptive learning rates
+        self.w = np.full(self.K, 1.0 / self.K, dtype=float)
+        self.cum_sq = np.zeros(self.K, dtype=float)
+        self.cum_l = np.zeros(self.K, dtype=float)
+        self.max_abs = np.zeros(self.K, dtype=float)
+        self.eta = np.zeros(self.K, dtype=float)
 
     def reset(self):
         self.w[:] = 1.0 / self.K
@@ -59,19 +78,16 @@ class _BOAStyleAggregator:
         self.max_abs[:] = 0.0
         self.eta[:] = 0.0
 
-    def aggregate(self, preds: np.ndarray) -> float:
-        # preds: (K,)
-        return float(np.sum(self.w * preds))
-
     def update(self, losses: np.ndarray):
-        """
-        losses: (K,) 每个专家在当前时刻的 loss（pinball）
-        我们用“相对损失”来更新，避免所有专家同向漂移导致数值不稳定。
-        """
         losses = np.asarray(losses, dtype=float).reshape(-1)
-        assert losses.shape[0] == self.K
+        if losses.shape[0] != self.K:
+            raise ValueError(f"losses shape {losses.shape} != (K,) with K={self.K}")
 
-        # centered loss
+        # safety clip (engineering)
+        if np.isfinite(self.loss_clip) and self.loss_clip > 0:
+            losses = np.clip(losses, -self.loss_clip, self.loss_clip)
+
+        # centered losses
         loss_bar = float(np.sum(self.w * losses))
         ell = losses - loss_bar  # (K,)
 
@@ -79,17 +95,20 @@ class _BOAStyleAggregator:
         self.cum_sq += ell ** 2
         self.max_abs = np.maximum(self.max_abs, np.abs(ell))
 
-        # BOA-like bounding term e_k (binary scale), 对应论文里需要 bounded experts/loss
+        # BOA-like bounding term e_k
         e_vals = 2.0 ** (np.ceil(np.log2(self.max_abs + self.eps)) + 1.0)
 
-        # adaptive eta
+        # adaptive eta_k
         logK = np.log(self.K + 1.0)
-        eta = np.minimum(1.0 / (e_vals + self.eps),
-                         np.sqrt(logK / (self.cum_sq + self.eps)))
+        eta = np.minimum(
+            1.0 / (e_vals + self.eps),
+            np.sqrt(logK / (self.cum_sq + self.eps)),
+        )
         eta = np.clip(eta, 0.0, self.clip_eta_max)
+        eta = np.maximum(eta, self.eta_floor)
         self.eta = eta
 
-        # l-values update（BOA-like）
+        # BOA-like l-values update
         self.cum_l += 0.5 * (ell * (1.0 + eta * ell) + e_vals * (eta * ell > 0.5))
 
         # weights update: w_k ∝ eta_k * exp(- eta_k * L_k)
@@ -105,147 +124,290 @@ class _BOAStyleAggregator:
 
 class AgACICP:
     """
-    AgACI：K 个 ACI(γ_k) 专家 + 对 lower/upper 两套独立在线聚合
-    - 每一步：先用每个专家给出 [l_k, u_k]
-    - 进行 bounded thresholding（Algorithm 1 line 5） :contentReference[oaicite:4]{index=4}
-    - 用 pinball loss 更新 lower/upper 各自聚合器（Algorithm 1 line 9-11） :contentReference[oaicite:5]{index=5}
+    AgACI for time series:
+      - K time-series ACI experts (ACICP) with different gammas.
+      - Aggregate lower/upper bounds with BOA-style online weights.
+      - Use pinball losses with beta_low=alpha/2, beta_up=1-alpha/2.
+
+    IMPORTANT:
+      - We cache expert bounds from predict() and reuse them in update().
+      - Experts producing non-finite bounds (±inf) are masked out from aggregation
+        (do NOT replace by huge numbers, which would explode the average).
     """
+
     def __init__(
         self,
         alpha: float = 0.1,
         gammas: Optional[List[float]] = None,
-        split_size: float = 0.75,
-        t_init: int = 200,
-        max_iter: int = 500,
         warmup_steps: int = 50,
+
+        # expert ACI params
+        T0: int = 500,
+        min_calib_size: int = 30,
+        warm_start: int = 50,
+        fallback_width: float = 3.0,
+        clip_alpha: bool = False,
+        eps: float = 1e-6,
+
+        # bounding (only for finite values)
         M_lower: float = -1e9,
         M_upper: float = 1e9,
+
+        # aggregator stability
+        agg_eps: float = 1e-12,
+        clip_eta_max: float = 50.0,
+        loss_clip: float = 1e6,
+        eta_floor: float = 1e-8,
+
         seed: int = 0,
+        **kwargs,
     ):
         self.cfg = AgACIConfig(
             alpha=float(alpha),
             gammas=tuple(gammas) if gammas is not None else AgACIConfig().gammas,
             warmup_steps=int(warmup_steps),
-            split_size=float(split_size),
-            t_init=int(t_init),
-            max_iter=int(max_iter),
+
+            T0=int(T0),
+            min_calib_size=int(min_calib_size),
+            warm_start=int(warm_start),
+            fallback_width=float(fallback_width),
+            clip_alpha=bool(clip_alpha),
+            eps=float(eps),
+
             M_lower=float(M_lower),
             M_upper=float(M_upper),
+
+            agg_eps=float(agg_eps),
+            clip_eta_max=float(clip_eta_max),
+            loss_clip=float(loss_clip),
+            eta_floor=float(eta_floor),
+
             seed=int(seed),
         )
 
         self.initial_alpha = float(alpha)
-        self.alpha = float(alpha)  # AgACI 不更新 alpha；这里只是保持接口一致
+        self.alpha = float(alpha)  # AgACI doesn't adapt alpha; keep for logging
 
         self.gammas = list(self.cfg.gammas)
         self.K = len(self.gammas)
 
-        # K 个 ACI 专家（各自维护自己的 alpha_t 和历史）
+        # Experts: time-series ACI with different step sizes (gamma)
         self.experts: List[ACICP] = []
         for k, g in enumerate(self.gammas):
             self.experts.append(
                 ACICP(
                     alpha=self.cfg.alpha,
-                    lr=float(g),                 # 在你的 ACICP 里 lr 被当成 gamma
-                    split_size=self.cfg.split_size,
-                    t_init=self.cfg.t_init,
-                    max_iter=self.cfg.max_iter,
+                    lr=float(g),  # in ACICP: lr is gamma
+                    T0=self.cfg.T0,
+                    min_calib_size=self.cfg.min_calib_size,
+                    warm_start=self.cfg.warm_start,
+                    fallback_width=self.cfg.fallback_width,
+                    clip_alpha=self.cfg.clip_alpha,
+                    eps=self.cfg.eps,
                     seed=self.cfg.seed + 97 * (k + 1),
                 )
             )
 
-        # 两个独立聚合器：lower / upper（分别聚合）
-        self.agg_low = _BOAStyleAggregator(self.K)
-        self.agg_up  = _BOAStyleAggregator(self.K)
+        self.agg_low = _BOAStyleAggregator(
+            self.K,
+            eps=self.cfg.agg_eps,
+            clip_eta_max=self.cfg.clip_eta_max,
+            loss_clip=self.cfg.loss_clip,
+            eta_floor=self.cfg.eta_floor,
+        )
+        self.agg_up = _BOAStyleAggregator(
+            self.K,
+            eps=self.cfg.agg_eps,
+            clip_eta_max=self.cfg.clip_eta_max,
+            loss_clip=self.cfg.loss_clip,
+            eta_floor=self.cfg.eta_floor,
+        )
 
-        # pinball 参数：β^(l)=α/2, β^(u)=1-α/2
+        # pinball beta for lower/upper
         self.beta_low = self.cfg.alpha / 2.0
-        self.beta_up  = 1.0 - self.cfg.alpha / 2.0
+        self.beta_up = 1.0 - self.cfg.alpha / 2.0
 
-        self.t = 0  # step counter
+        self.t = 0
+
+        # cache from last predict()
+        self._last_expert_lows: Optional[np.ndarray] = None
+        self._last_expert_ups: Optional[np.ndarray] = None
+        self._last_finite_mask: Optional[np.ndarray] = None
+        self._last_mu: Optional[float] = None
+        self._last_unc: Optional[float] = None
 
     def initialize(self, initial_data=None):
         self.alpha = self.initial_alpha
         self.t = 0
         self.agg_low.reset()
         self.agg_up.reset()
+
+        self._last_expert_lows = None
+        self._last_expert_ups = None
+        self._last_finite_mask = None
+        self._last_mu = None
+        self._last_unc = None
+
         for e in self.experts:
             e.initialize(initial_data=initial_data)
 
-    def predict(self, base_prediction=None, model_uncertainty=1.0, x=None, **kwargs):
-        if x is None:
-            raise ValueError("AgACICP.predict requires x=... (feature vector).")
+    def _fallback_interval(self, mu: float, unc: float) -> Tuple[float, float]:
+        w = self.cfg.fallback_width * max(1e-12, float(unc))
+        return float(mu - w), float(mu + w)
 
-        # warmup：前 warmup_steps 用“均匀权重”（或你也可以固定选 γ=0 的专家）
+    def predict(
+        self,
+        base_prediction=None,
+        model_uncertainty: Number = 1.0,
+        x=None,
+        **kwargs,
+    ) -> Tuple[float, float]:
+        """
+        Return aggregated interval (low_agg, up_agg).
+        Cache expert bounds for update().
+        """
+        mu = float(base_prediction) if base_prediction is not None else 0.0
+        unc = float(model_uncertainty)
+
         use_uniform = (self.t < self.cfg.warmup_steps)
-        if use_uniform:
-            w_low = np.full(self.K, 1.0 / self.K, dtype=float)
-            w_up  = np.full(self.K, 1.0 / self.K, dtype=float)
-        else:
-            w_low = self.agg_low.w
-            w_up  = self.agg_up.w
+        w_low = np.full(self.K, 1.0 / self.K, dtype=float) if use_uniform else self.agg_low.w.copy()
+        w_up = np.full(self.K, 1.0 / self.K, dtype=float) if use_uniform else self.agg_up.w.copy()
 
-        lows = np.zeros(self.K, dtype=float)
-        ups  = np.zeros(self.K, dtype=float)
+        lows = np.full(self.K, np.nan, dtype=float)
+        ups = np.full(self.K, np.nan, dtype=float)
+        finite_mask = np.zeros(self.K, dtype=bool)
 
         for k, e in enumerate(self.experts):
-            l_k, u_k = e.predict(base_prediction=base_prediction, model_uncertainty=model_uncertainty, x=x)
+            l_k, u_k = e.predict(
+                base_prediction=mu,
+                model_uncertainty=unc,
+                x=x,
+            )
 
-            # bounded thresholding
-            if not np.isfinite(l_k):
-                l_k = self.cfg.M_lower
-            if not np.isfinite(u_k):
-                u_k = self.cfg.M_upper
+            # IMPORTANT: do not replace inf with huge numbers; mask them out.
+            if (not np.isfinite(l_k)) or (not np.isfinite(u_k)):
+                continue
 
             l_k = float(np.clip(l_k, self.cfg.M_lower, self.cfg.M_upper))
             u_k = float(np.clip(u_k, self.cfg.M_lower, self.cfg.M_upper))
 
             lows[k] = l_k
-            ups[k]  = u_k
+            ups[k] = u_k
+            finite_mask[k] = True
 
-        # weighted mean aggregation
-        low_agg = float(np.sum(w_low * lows) / (np.sum(w_low) + 1e-12))
-        up_agg  = float(np.sum(w_up  * ups)  / (np.sum(w_up)  + 1e-12))
+        # cache for update()
+        self._last_expert_lows = lows.copy()
+        self._last_expert_ups = ups.copy()
+        self._last_finite_mask = finite_mask.copy()
+        self._last_mu = mu
+        self._last_unc = unc
+
+        # if no finite experts, fallback
+        if not np.any(finite_mask):
+            return self._fallback_interval(mu, unc)
+
+        # renormalize weights on finite experts only
+        w_low[~finite_mask] = 0.0
+        w_up[~finite_mask] = 0.0
+        w_low = w_low / (float(w_low.sum()) + 1e-12)
+        w_up = w_up / (float(w_up.sum()) + 1e-12)
+
+        low_agg = float(np.nansum(w_low * lows))
+        up_agg = float(np.nansum(w_up * ups))
+
+        # final sanity: ensure order
+        if low_agg > up_agg:
+            low_agg, up_agg = up_agg, low_agg
 
         return low_agg, up_agg
 
-    def update(self, y_true, y_pred=None, prediction_interval=None, interval=None, x=None, **kwargs):
+    def update(
+        self,
+        y_true,
+        y_pred=None,
+        prediction_interval=None,
+        interval=None,
+        x=None,
+        model_uncertainty: Number = 1.0,
+        **kwargs,
+    ):
+        """
+        Update:
+          1) experts (time-series ACI needs y_pred for residual score)
+          2) aggregators via pinball losses
+
+        Uses cached expert bounds from the preceding predict().
+        """
         if prediction_interval is None:
             prediction_interval = interval
         if prediction_interval is None:
             raise ValueError("AgACICP.update requires prediction_interval (or interval).")
-        if x is None:
-            raise ValueError("AgACICP.update requires x=... (feature vector).")
+        if y_pred is None and self._last_mu is None:
+            raise ValueError("AgACICP.update requires y_pred (or prior predict cache) for ACI experts.")
 
-        y_true = float(y_true)
-        low_agg, up_agg = prediction_interval
+        yt = float(y_true)
 
-        # 1) 先让每个 ACI 专家用自己的区间更新自己的 alpha / 历史（内部alpha 更新）
-        expert_lows = np.zeros(self.K, dtype=float)
-        expert_ups  = np.zeros(self.K, dtype=float)
+        # enforce same-step context (prefer cache)
+        mu = float(self._last_mu) if self._last_mu is not None else float(y_pred)
+        unc = float(self._last_unc) if self._last_unc is not None else float(model_uncertainty)
 
+        if self._last_expert_lows is None or self._last_expert_ups is None or self._last_finite_mask is None:
+            # fallback: compute once (but do NOT do it twice)
+            lows = np.full(self.K, np.nan, dtype=float)
+            ups = np.full(self.K, np.nan, dtype=float)
+            finite_mask = np.zeros(self.K, dtype=bool)
+            for k, e in enumerate(self.experts):
+                l_k, u_k = e.predict(base_prediction=mu, model_uncertainty=unc, x=x)
+                if (not np.isfinite(l_k)) or (not np.isfinite(u_k)):
+                    continue
+                lows[k] = float(np.clip(l_k, self.cfg.M_lower, self.cfg.M_upper))
+                ups[k] = float(np.clip(u_k, self.cfg.M_lower, self.cfg.M_upper))
+                finite_mask[k] = True
+        else:
+            lows = self._last_expert_lows
+            ups = self._last_expert_ups
+            finite_mask = self._last_finite_mask
+
+        # 1) update experts (only finite ones have meaningful bounds)
         for k, e in enumerate(self.experts):
-            l_k, u_k = e.predict(x=x)  # 用专家自己的当前状态再算一次该步区间
-            if not np.isfinite(l_k):
-                l_k = self.cfg.M_lower
-            if not np.isfinite(u_k):
-                u_k = self.cfg.M_upper
-            l_k = float(np.clip(l_k, self.cfg.M_lower, self.cfg.M_upper))
-            u_k = float(np.clip(u_k, self.cfg.M_lower, self.cfg.M_upper))
+            if not bool(finite_mask[k]):
+                # even if expert interval is infinite, we can still update it using the observed miss
+                # but we must provide a valid interval; use fallback to avoid NaN
+                l_k, u_k = self._fallback_interval(mu, unc)
+            else:
+                l_k, u_k = float(lows[k]), float(ups[k])
 
-            expert_lows[k] = l_k
-            expert_ups[k]  = u_k
+            e.update(
+                y_true=yt,
+                y_pred=mu,
+                prediction_interval=(l_k, u_k),
+                x=x,
+            )
 
-            # 更新专家（会推进它的历史，并更新它自己的 alpha）
-            e.update(y_true=y_true, prediction_interval=(l_k, u_k), x=x)
+        # 2) pinball losses for aggregation (only for finite experts)
+        loss_low = np.zeros(self.K, dtype=float)
+        loss_up = np.zeros(self.K, dtype=float)
+        for k in range(self.K):
+            if not bool(finite_mask[k]):
+                # assign neutral-ish loss; we set to 0 so it won't dominate centered loss
+                # (the mask will also effectively drop it due to weight=0 after normalization at predict time)
+                loss_low[k] = 0.0
+                loss_up[k] = 0.0
+            else:
+                loss_low[k] = pinball_loss(yt, q=float(lows[k]), beta=self.beta_low)
+                loss_up[k] = pinball_loss(yt, q=float(ups[k]), beta=self.beta_up)
 
-        # 2) 计算 pinball losses（lower/upper 独立） 
-        loss_low = np.array([pinball_loss(y_true, q=expert_lows[k], beta=self.beta_low) for k in range(self.K)], dtype=float)
-        loss_up  = np.array([pinball_loss(y_true, q=expert_ups[k],  beta=self.beta_up)  for k in range(self.K)], dtype=float)
-
-        # 3) 更新聚合权重（BOA-style）
+        # 3) update aggregators after warmup
         if self.t >= self.cfg.warmup_steps:
             self.agg_low.update(loss_low)
             self.agg_up.update(loss_up)
 
         self.t += 1
+        self.alpha = self.initial_alpha  # keep for logging
+
+        # clear cache to avoid accidental reuse across steps
+        self._last_expert_lows = None
+        self._last_expert_ups = None
+        self._last_finite_mask = None
+        self._last_mu = None
+        self._last_unc = None

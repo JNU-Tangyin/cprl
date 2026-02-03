@@ -61,7 +61,7 @@ def parse_args():
         "--cp_mode",
         type=str,
         default="acp",
-        choices=["acp", "standard", "aci", "agaci", "nex", "cqr", "dfpi", "enbpi"],
+        choices=["acp", "standard", "aci", "agaci", "nex", "cqr", "dfpi", "enbpi", "cptc", "hopcpt"],
     )
     parser.add_argument("--spectral_window", type=int, default=64)
     parser.add_argument("--n_latent_states", type=int, default=3)
@@ -73,6 +73,25 @@ def parse_args():
     parser.add_argument("--use_gpu", action="store_true")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--gpu_type", type=str, default="cuda", choices=["cuda", "mps", "cpu"])
+
+    # CPTC
+    parser.add_argument("--cptc_gamma", type=float, default=0.2)
+    parser.add_argument("--cptc_warm_start", type=int, default=100)
+    parser.add_argument("--cptc_max_width", type=float, default=3.0)
+    parser.add_argument("--cptc_min_residuals", type=int, default=25)
+    parser.add_argument("--cptc_warm_threshold", type=float, default=0.3)
+    parser.add_argument("--cptc_aggregate_sort_asc", type=int, default=1)
+
+    # HopCPT
+    parser.add_argument("--hopcpt_emb_dim", type=int, default=32)
+    parser.add_argument("--hopcpt_hidden_dim", type=int, default=64)
+    parser.add_argument("--hopcpt_train_epochs", type=int, default=200)
+    parser.add_argument("--hopcpt_lr", type=float, default=1e-3)
+    parser.add_argument("--hopcpt_beta", type=float, default=1.0)
+    parser.add_argument("--hopcpt_online_update", type=int, default=1)
+
+    # ---- sensitive analysis ----
+    parser.add_argument("--worst_window", type=int, default=100)
 
     return parser.parse_args()
 
