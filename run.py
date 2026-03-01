@@ -93,6 +93,10 @@ def parse_args():
     # ---- sensitive analysis ----
     parser.add_argument("--worst_window", type=int, default=100)
 
+    # ---- ablation ----
+    parser.add_argument("--ablation", type=int, default=0) # 1是直接跑完，0是要指定消融那个模块
+    parser.add_argument("--ablation_mode", type=str, default="M0")
+
     return parser.parse_args()
 
 
@@ -142,11 +146,17 @@ if __name__ == "__main__":
     else:
         for k, v in sorted(vars(args).items()):
             print(f"  {k}: {v}")
+    
+    if int(getattr(args, "ablation", 0)) == 1:
+        # run M0~M4 as a suite
+        from exp.exp_ablation import run_ablation
+        run_ablation(args)
+        sys.exit(0)
 
     for ii in range(args.itr):
         exp = ExpConformal(args)
 
-        setting = "{}_{}_lags{}_model{}_cp{}_a{}_cw{}_seed{}_mode{}_{}".format(
+        setting = "{}_{}_lags{}_model{}_cp{}_a{}_cw{}_seed{}_mode{}_{}_{}".format(
             args.task_name,
             args.exp_name,
             args.lags,
@@ -157,6 +167,7 @@ if __name__ == "__main__":
             args.seed,
             args.run_mode,
             f"{args.des}-{ii}",
+            getattr(args, "ablation_mode", "M0"),
         )
 
         print(f">>>>>>> start : {setting} >>>>>>>>>>>>>>>>>>>>>>>>>>")

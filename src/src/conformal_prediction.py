@@ -26,19 +26,20 @@ class ConformalPredictionConfig:
     feature_ema: float = 0.05         
 
     # sliding windows
-    calib_window_size: int = 200
-    min_calib_size: int = 30
-    min_regime_calib_size: int = 50
+    calib_window_size: int = 150
+    min_calib_size: int = 20
+    min_regime_calib_size: int = 20
 
     # spectral term weight
     lambda_spectral: float = 0.5
+    min_spectral_size: int = 30
 
     # per-regime fallback thresholds
-    min_regime_eval_size: int = 30
-    min_regime_cov_size: int = 30
+    min_regime_eval_size: int = 20
+    min_regime_cov_size: int = 20
 
     # CEM replay buffer
-    eval_window_size: int = 100
+    eval_window_size: int = 150
 
     # coverage penalty window
     coverage_window: int = 50
@@ -58,6 +59,11 @@ class ConformalPredictionConfig:
     cem_noise: float = 0.02
     cem_lr: float = 0.3
     cem_n_iters: int = 3
+
+    use_spectral: bool = True
+    use_regime: bool = True
+    use_cem: bool = True
+    width_weight: float = 1.0
 
 
 class _SpectralDrift:
@@ -234,25 +240,55 @@ class _AdaptiveRegimeKernel:
         denom = (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6)
         return float(np.dot(a, b) / denom)
 
-    def _features(self, window_errors: np.ndarray) -> np.ndarray:
-        w = np.asarray(window_errors, dtype=float)
-        w = w[np.isfinite(w)]
-        if len(w) < 10:
+    def _features(self, price_window: np.ndarray) -> np.ndarray:
+        """
+        Market-state features from past price window.
+
+        price_window: shape (L,) = lagged observed values (e.g., exchange rate level)
+        We use log-return / volatility / jump / autocorr / trend slope.
+        """
+
+        p = np.asarray(price_window, dtype=float).reshape(-1)
+        p = p[np.isfinite(p)]
+        if p.size < 12:
             return np.zeros(5, dtype=float)
 
-        vol_rob = self._mad(w)
-        vol_ewma = self._ewma_vol(w)
-        jump = self._jump_rate(w)
-        ac1 = self._acf1(w)
-        rel_change = float(np.mean(np.abs(np.diff(w)) / (w[:-1] + 1e-6)))
+        # log returns (robust to scale)
+        eps = 1e-8
+        r = np.diff(np.log(np.clip(p, eps, None)))
+        r = r[np.isfinite(r)]
+        if r.size < 10:
+            return np.zeros(5, dtype=float)
+
+        # 1) robust vol (MAD on returns)
+        med = np.median(r)
+        mad = np.median(np.abs(r - med))
+        vol_rob = 1.4826 * mad + 1e-6
+
+        # 2) EWMA vol (on returns)
+        vol_ewma = self._ewma_vol(r)
+
+        # 3) jump rate (on returns)
+        jump = self._jump_rate(r)
+
+        # 4) ACF1 of returns
+        ac1 = self._acf1(r)
+
+        # 5) trend slope of price level (normalized)
+        t = np.arange(p.size, dtype=float)
+        t = t - t.mean()
+        denom = (np.dot(t, t) + 1e-6)
+        slope = float(np.dot(t, (p - p.mean())) / denom)
+        slope = slope / (np.std(p) + 1e-6)
 
         return np.array([
             np.log1p(vol_rob),
             np.log1p(vol_ewma),
             jump,
             ac1,
-            rel_change,
+            slope,
         ], dtype=float)
+        
 
     def _dist2(self, a: np.ndarray, b: np.ndarray) -> float:
         d = a - b
@@ -270,8 +306,8 @@ class _AdaptiveRegimeKernel:
         dmin = float(np.sqrt(max(d2[j], 0.0)))
         return j, dmin
 
-    def _update_and_get_regime(self, window_errors: np.ndarray) -> int:
-        f = self._features(window_errors)
+    def _update_and_get_regime(self, price_window: np.ndarray) -> int:
+        f = self._features(price_window)
         j, dmin = self._assign(f)
 
         # sticky preference
@@ -328,7 +364,7 @@ class AdaptiveConformalPredictor:
         self.state_history: List[int] = []
 
         # rolling errors
-        self.prediction_errors: List[float] = []
+        self.prediction_errors: Deque[float] = deque(maxlen=int(self.config.window_size)+1)
 
         # buffers: global + per regime
         self._init_buffers()
@@ -372,14 +408,23 @@ class AdaptiveConformalPredictor:
 
     def _use_regime(self, rid: int) -> bool:
         """Whether regime-specific stats are trusted (sample size gates)."""
+        if not self.config.use_regime:
+            return False
         rid = int(rid)
-        return (
+        
+        ok = (
             len(self.calib_e_lo_by_regime[rid]) >= int(self.config.min_regime_calib_size)
             and len(self.calib_e_hi_by_regime[rid]) >= int(self.config.min_regime_calib_size)
             and len(self.eval_buffer_by_regime[rid]) >= int(self.config.min_regime_eval_size)
             and len(self.cover_hist_by_regime[rid]) >= int(self.config.min_regime_cov_size)
-            and len(self.calib_s_by_regime[rid]) >= int(self.config.min_regime_calib_size)
         )
+        if not ok:
+            return False
+
+        if bool(self.config.use_spectral):
+            return len(self.calib_s_by_regime[rid]) >= int(self.config.min_regime_calib_size)
+
+        return True
 
     def _buffers_global(self):
         """Return global buffers (no gating)."""
@@ -471,13 +516,16 @@ class AdaptiveConformalPredictor:
         q_hi = float(np.quantile(e_hi, 1.0 - a))
 
         q_s = 0.0
-        if len(s_buf) >= int(self.config.min_calib_size):
+        if len(s_buf) >= int(getattr(self.config, "min_spectral_size", self.config.min_calib_size)):
             s = np.asarray(list(s_buf), float)
             s = s[np.isfinite(s)]
             if len(s) > 0:
                 q_s = float(np.quantile(s, 1.0 - a))
 
         extra = float(self.config.lambda_spectral) * float(k_scale) * float(q_s)
+        if not self.config.use_spectral:
+            extra = 0.0
+
         m_lo = max(0.0, q_lo + extra)
         m_hi = max(0.0, q_hi + extra)
         return float(m_lo), float(m_hi), float(q_s)
@@ -533,7 +581,8 @@ class AdaptiveConformalPredictor:
             target = float(self.config.target_coverage)
             gap = max(0.0, target - c_hat)
             penalty = float(self.config.lambda_cov) * (gap ** 2)
-            return -(float(np.mean(winklers)) + penalty)
+            w = float(getattr(self.config, "width_weight", 1.0))
+            return -(w * float(np.mean(winklers)) + penalty)
 
         return obj
 
@@ -581,88 +630,27 @@ class AdaptiveConformalPredictor:
             target = float(self.config.target_coverage)
             gap = max(0.0, target - c_hat)
             penalty = float(self.config.lambda_cov) * (gap ** 2)
-            return -(float(np.mean(winklers)) + penalty)
+            w = float(getattr(self.config, "width_weight", 1.0))
+            return -(w * float(np.mean(winklers)) + penalty)
 
         return obj
 
+    def _extract_price_window(self, x) -> Optional[np.ndarray]:
+        if x is None:
+            return None
+        a = np.asarray(x, dtype=float)
+        if a.ndim == 1:
+            return a
+        if a.ndim == 2:
+            return a[:, 0]
+        if a.ndim == 3:
+            return a[0, :, 0]
+        return a.reshape(-1)
+
     # ============================================================
     # Public API: one-step closed loop
-    # ============================================================
-    def step(self, base_prediction: float, y_true: float, model_uncertainty: float, alpha_override: Optional[float] = None,) -> Tuple[float, float]: 
-        if self.current_state is None:
-            self.current_state = 0
+    # =========================================================
 
-        if len(self.prediction_errors) >= int(self.config.window_size):
-            w = np.asarray(self.prediction_errors[-int(self.config.window_size):], float)
-            rid = int(self._regime._update_and_get_regime(w))
-        else:
-            rid = 0
-
-        rid = int(max(0, min(self.config.max_regimes - 1, rid)))
-        self.current_state = rid
-        self.state_history.append(rid)
-
-        # 2) gate once per step (use for action + update)
-        use_r = bool(self._use_regime(rid))
-
-        # 3) choose alpha
-        if alpha_override is not None:
-            alpha = float(alpha_override)
-        else:
-            alpha = float(self._alpha.choose(rid, use_regime=use_r))
-
-        # 4) compute interval (and q_s used by interval)
-        if use_r:
-            m_lo, m_hi, q_s = self._margins_regime(rid, alpha=alpha, model_uncertainty=float(model_uncertainty))
-        else:
-            m_lo, m_hi, q_s = self._margins_global(alpha=alpha, model_uncertainty=float(model_uncertainty))
-
-        lower = float(base_prediction) - float(m_lo)
-        upper = float(base_prediction) + float(m_hi)
-
-        # 5) observe outcome -> update buffers (always update both global + rid)
-        e_lo = max(0.0, float(base_prediction) - float(y_true))
-        e_hi = max(0.0, float(y_true) - float(base_prediction))
-        err = float(e_lo + e_hi)
-
-        self.calib_e_lo_global.append(float(e_lo))
-        self.calib_e_hi_global.append(float(e_hi))
-        self.calib_e_lo_by_regime[rid].append(float(e_lo))
-        self.calib_e_hi_by_regime[rid].append(float(e_hi))
-
-        self.eval_buffer_global.append((float(base_prediction), float(y_true)))
-        self.eval_buffer_by_regime[rid].append((float(base_prediction), float(y_true)))
-
-        covered = 1.0 if (lower <= float(y_true) <= upper) else 0.0
-        self.cover_hist_global.append(float(covered))
-        self.cover_hist_by_regime[rid].append(float(covered))
-
-        # 6) drift update (append s to buffers; do NOT reset q_s here)
-        self.prediction_errors.append(float(err))
-        if len(self.prediction_errors) >= int(self.config.window_size):
-            window = np.asarray(self.prediction_errors[-int(self.config.window_size):], float)
-            s = float(self._drift.score(window[:-1], window[1:]))
-            self.calib_s_global.append(s)
-            self.calib_s_by_regime[rid].append(s)
-
-        # 7) refresh k
-        self._maybe_refresh_k(rid)
-
-        # 8) update alpha controller (global objective always; regime objective only if use_r)
-        obj_g = self._objective_global()
-        obj_r = self._objective_regime(rid)
-        mu_g, mu_used = self._alpha.step(rid, obj_g, obj_r, update_regime=use_r)
-        _ = (mu_g, mu_used)
-
-        # 9) logs (single source of truth)
-        self.alpha_history.append(float(mu_used))
-        # record the k actually used by the interval this step:
-        k_used = float(self._buffers_regime(rid)[-1]) if use_r else float(self._buffers_global()[-1])
-        self.k_history.append(k_used)
-        self.spectral_q_history.append(float(q_s))
-        self.use_regime_history.append(bool(use_r))
-
-        return lower, upper
 
     def reset(self) -> None:
         self.current_state = None
@@ -679,32 +667,69 @@ class AdaptiveConformalPredictor:
         **kwargs,
         ):
 
+        if getattr(self, "_pending", None) is not None:
+            self._dropped_pending = getattr(self, "_dropped_pending", 0) + 1
+            self._pending = None
+
         yp = base_prediction if base_prediction is not None else y_pred
         unc = model_uncertainty if model_uncertainty is not None else uncertainty
 
         yp = float(yp)
         unc = float(unc) if unc is not None else 1.0
 
-        rid = int(self.current_state) if self.current_state is not None else 0
+        x = kwargs.get("x", None)
+        if x is None:
+            x = kwargs.get("X", None)
+        if x is None:
+            x = kwargs.get("features", None)
 
+        if x is not None:
+            pw = self._extract_price_window(x)
+            if pw is None or pw.size < 12:
+                rid = 0
+            else:
+                rid = int(self._regime._update_and_get_regime(pw))
+        else:
+            rid = 0
 
         rid = int(max(0, min(self.config.max_regimes - 1, rid)))
+        self.current_state = rid
+        self.state_history.append(rid)
+
         use_r = bool(self._use_regime(rid))
 
-        alpha = float(self._alpha.choose(rid, use_regime=use_r))
-
-        self._pending_pred = yp
-        self._pending_unc = unc
-        self._pending_alpha = alpha
+        if not self.config.use_cem:
+            alpha = float(self.config.initial_alpha)
+        else:
+            alpha = float(self._alpha.choose(rid, use_regime=use_r))
 
         if use_r:
-            m_lo, m_hi, _ = self._margins_regime(rid, alpha=alpha, model_uncertainty=unc)
+            m_lo, m_hi, q_s = self._margins_regime(rid, alpha=alpha, model_uncertainty=unc)
+            k_used = float(self._k_scale_by_regime[rid])
         else:
-            m_lo, m_hi, _ = self._margins_global(alpha=alpha, model_uncertainty=unc)
+            m_lo, m_hi, q_s = self._margins_global(alpha=alpha, model_uncertainty=unc)
+            k_used = float(self._k_scale_global)
 
-        self.use_regime_history.append(bool(use_r))
+        lower = float(yp - m_lo)
+        upper = float(yp + m_hi)
 
-        return float(yp - m_lo), float(yp + m_hi)
+        self._pending = {
+            "rid": rid,
+            "use_r": use_r,
+            "yp": yp,
+            "unc": unc,
+            "alpha": alpha,
+            "m_lo": float(m_lo),
+            "m_hi": float(m_hi),
+            "q_s": float(q_s),
+            "k_used": float(k_used),
+            "lower": float(lower),
+            "upper": float(upper),
+        }
+
+        self._last_alpha_sampled = float(alpha)
+
+        return lower, upper
     
     def update(
         self,
@@ -717,16 +742,65 @@ class AdaptiveConformalPredictor:
         yt = y_true if y_true is not None else (y if y is not None else y_obs)
         yt = float(yt)
 
-        yp = float(getattr(self, "_pending_pred", 0.0))
-        unc = float(getattr(self, "_pending_unc", 1.0))
-        alpha = float(getattr(self, "_pending_alpha", self.config.initial_alpha))
+        p = getattr(self, "_pending", None)
 
-        return self.step(
-            base_prediction=yp,
-            y_true=yt,
-            model_uncertainty=unc,
-            alpha_override=alpha,
-        )
+        if p is None:
+            return None
+
+        rid = int(p["rid"])
+        use_r_pred = bool(p["use_r"])
+        yp = float(p["yp"])
+        alpha = float(p["alpha"])
+        lower = float(p["lower"])
+        upper = float(p["upper"])
+        q_s = float(p["q_s"])
+
+        e_lo = max(0.0, yp - yt)
+        e_hi = max(0.0, yt - yp)
+        err = float(e_lo + e_hi)
+
+        self.calib_e_lo_global.append(float(e_lo))
+        self.calib_e_hi_global.append(float(e_hi))
+        self.calib_e_lo_by_regime[rid].append(float(e_lo))
+        self.calib_e_hi_by_regime[rid].append(float(e_hi))
+
+        self.eval_buffer_global.append((float(yp), float(yt)))
+        self.eval_buffer_by_regime[rid].append((float(yp), float(yt)))
+
+        covered = 1.0 if (lower <= yt <= upper) else 0.0
+        self.cover_hist_global.append(float(covered))
+        self.cover_hist_by_regime[rid].append(float(covered))
+
+        self.prediction_errors.append(float(err))
+        if self.config.use_spectral:
+            s = 0.0
+            if len(self.prediction_errors) >= int(self.config.window_size):
+                window = np.asarray(list(self.prediction_errors)[-int(self.config.window_size):], float)
+                s = float(self._drift.score(window[:-1], window[1:]))
+            self.calib_s_global.append(s)
+            self.calib_s_by_regime[rid].append(float(s))
+
+            self._maybe_refresh_k(rid)
+
+        use_r_now = bool(self._use_regime(rid))
+
+        if self.config.use_cem:
+            obj_g = self._objective_global()
+            obj_r = self._objective_regime(rid)
+            mu_g, mu_used = self._alpha.step(rid, obj_g, obj_r, update_regime=use_r_now)
+            alpha_state = float(mu_used)
+        else:
+            alpha_state = float(alpha)
+
+        self.alpha_history.append(alpha_state)
+
+        self.k_history.append(float(p["k_used"]))
+        self.spectral_q_history.append(float(q_s))
+        self.use_regime_history.append(bool(use_r_pred))
+
+        self._pending = None
+
+        return float(lower), float(upper)
 
     def start_test(self):
         return
