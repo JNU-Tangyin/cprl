@@ -25,13 +25,6 @@ def build_conformal_predictor(args):
     if mode == "acp":
         return build_acp_ours(args)
 
-    elif mode == "standard":
-        return StandardCP(
-            alpha=alpha,
-            window_size=calib_window_size,
-            min_calib_size=min_calib_size,
-        )
-
     elif mode == "aci":
         return ACICP(
             alpha=alpha,

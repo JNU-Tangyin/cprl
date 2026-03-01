@@ -33,7 +33,7 @@ from src.utils import (
 from src.result_logger import ResultLogger
 
 # ============================================================
-# Robust CP call helpers (compat ACP.step or ACI/EnbPI predict+update)
+# Robust CP call helpers (compat A or ACI/EnbPI predict+update)
 # ============================================================
 
 def _call_with_accepted_kwargs(fn, **kwargs):
@@ -153,91 +153,41 @@ def _try_get_alpha(cp) -> float:
     - ACI/EnbPI-like baselines: cp.alpha exists
     - Your ACP: may also have cp.alpha or alpha_history
     """
+    if hasattr(cp, "_last_alpha_sampled"):
+        try:
+            return float(cp._last_alpha_sampled)
+        except Exception:
+            pass
+
     if hasattr(cp, "alpha_history") and isinstance(getattr(cp, "alpha_history"), list) and len(cp.alpha_history) > 0:
         a = cp.alpha_history[-1]
         try:
             return float(a)
         except Exception:
             pass
+
     if hasattr(cp, "alpha"):
         try:
             return float(cp.alpha)
         except Exception:
             return float("nan")
+
     return float("nan")
 
 
-def _unified_cp_step(
-    cp,
-    *,
-    y_pred: float,
-    y_true: float,
-    uncertainty: float,
-    x=None,
-    step=None,
-    horizon=None,
-    update: bool = True,
-) -> Tuple[Tuple[float, float], float, float]:
-    """
-    Return: (interval(lo,hi), alpha_used, alpha_after)
-
-    Priority:
-      1) predict + (optional) update/observe  [best for most CPs, and for your ACP predict/update semantics]
-      2) closed-loop step(...)                [fallback for CPs that only implement step]
-    """
-
-    # --------- 1) prefer predict/update if predict exists ----------
-    if hasattr(cp, "predict") and callable(getattr(cp, "predict")):
-        a_before = _try_get_alpha(cp)
-
-        interval = _cp_predict(cp, y_pred=y_pred, uncertainty=uncertainty, x=x, step=step, horizon=horizon)
-        a_used = _try_get_alpha(cp)
-        if not np.isfinite(a_used):
-            a_used = a_before
-
-        if update:
-            _cp_update(cp, y_true=y_true, y_pred=y_pred, interval=interval, x=x, step=step)
-
-        a_after = _try_get_alpha(cp)
-
-        # for your ACP: after update, mu_global is often the more meaningful "post-update alpha center"
-        if hasattr(cp, "_alpha") and hasattr(cp._alpha, "mu_global"):
-            try:
-                a_after = float(cp._alpha.mu_global)
-            except Exception:
-                pass
-
-        return interval, float(a_used), float(a_after)
-
-    if hasattr(cp, "step") and callable(getattr(cp, "step")):
-        a_before = _try_get_alpha(cp)
-        interval = _call_with_accepted_kwargs(
-            cp.step,
-            base_prediction=y_pred,
-            y_true=y_true,
-            model_uncertainty=uncertainty,
-            y_pred=y_pred,
-            uncertainty=uncertainty,
-            x=x,
-            step=step,
-            horizon=horizon,
-        )
-        lo, hi = _normalize_interval(interval)
-
-        a_used = _try_get_alpha(cp)
-        if not np.isfinite(a_used):
-            a_used = a_before
-
-        a_after = a_used
-        if hasattr(cp, "_alpha") and hasattr(cp._alpha, "mu_global"):
-            try:
-                a_after = float(cp._alpha.mu_global)
-            except Exception:
-                pass
-
-        return (float(lo), float(hi)), float(a_used), float(a_after)
-
-    raise AttributeError("CP object has neither predict nor step.")
+def _unified_cp_step(cp, *, y_pred, y_true, uncertainty, x=None, step=None, horizon=None, update=True):
+    a_before = _try_get_alpha(cp)
+    interval = _cp_predict(cp, y_pred=y_pred, uncertainty=uncertainty, x=x, step=step, horizon=horizon)
+    a_used = _try_get_alpha(cp)
+    if update:
+        _cp_update(cp, y_true=y_true, y_pred=y_pred, interval=interval, x=x, step=step)
+    a_after = _try_get_alpha(cp)
+    if hasattr(cp, "_alpha") and hasattr(cp._alpha, "mu_global"):
+        try:
+            a_after = float(cp._alpha.mu_global)
+        except Exception:
+            pass
+    return interval, float(a_used if np.isfinite(a_used) else a_before), float(a_after)
 
 
 # ============================================================
@@ -771,7 +721,14 @@ class ExpConformal(ExpBasic):
             f"RCS={final_rcs:.4f}"
         )
 
-        dyn_path = os.path.join("results", "dynamics", f"{setting}.csv")
+        base_results_dir = getattr(self.args, "results_dir", "results")
+
+        if hasattr(self.args, "result_tag") and self.args.result_tag == "ablation":
+            dyn_dir = os.path.join(base_results_dir, "ablation", "dynamics")
+        else:
+            dyn_dir = os.path.join(base_results_dir, "dynamics")
+
+        dyn_path = os.path.join(dyn_dir, f"{setting}.csv")
         _write_dynamics_csv(dyn_path, self.test_dynamics)
         print(f"[Dynamics] saved: {dyn_path}")
 
@@ -824,11 +781,14 @@ class ExpConformal(ExpBasic):
         os.makedirs("v_results", exist_ok=True)
         for sub in ["prediction_intervals", "alpha_curves", "interval_widths"]:
             os.makedirs(os.path.join("v_results", sub), exist_ok=True)
-        os.makedirs(os.path.join("results", "dynamics"), exist_ok=True)
+        os.makedirs(os.path.join(getattr(self.args, "results_dir", "results"), "dynamics"), exist_ok=True)
+
+        conformal_csv = getattr(self.args, "conformal_csv_path", os.path.join("results", "conformal_results.csv"))
+        adaptive_csv  = getattr(self.args, "adaptive_csv_path",  os.path.join("results", "adaptive_conformal_results.csv"))
 
         logger = ResultLogger(
-            conformal_csv_path="results/conformal_results.csv",
-            adaptive_csv_path="results/adaptive_conformal_results.csv",
+            conformal_csv_path=conformal_csv,
+            adaptive_csv_path=adaptive_csv,
         )
 
         train_loader, calib_loader, test_loader, _, _, _ = self.get_data()
