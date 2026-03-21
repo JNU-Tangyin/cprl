@@ -22,15 +22,15 @@ def pinball_loss(y: float, q: float, beta: float) -> float:
 @dataclass
 class AgACIConfig:
     alpha: float = 0.1
-    gammas: Tuple[float, ...] = (0.001, 0.01, 0.05, 0.1)
+    gammas: Tuple[float, ...] = (1e-4, 4e-4, 7e-4, 1e-3, 4e-3, 7e-3, 1e-2)
     warmup_steps: int = 50
 
     # ---- expert (time-series ACI) params ----
     T0: int = 500
     min_calib_size: int = 30
-    warm_start: int = 50
+    warm_start: int = 10
     fallback_width: float = 3.0
-    clip_alpha: bool = False
+    clip_alpha: bool = True
     eps: float = 1e-6
 
     # ---- bounded thresholding domain (only applied to finite expert outputs) ----
@@ -144,9 +144,9 @@ class AgACICP:
         # expert ACI params
         T0: int = 500,
         min_calib_size: int = 30,
-        warm_start: int = 50,
+        warm_start: int = 10,
         fallback_width: float = 3.0,
-        clip_alpha: bool = False,
+        clip_alpha: bool = True,
         eps: float = 1e-6,
 
         # bounding (only for finite values)
@@ -197,7 +197,7 @@ class AgACICP:
             self.experts.append(
                 ACICP(
                     alpha=self.cfg.alpha,
-                    lr=float(g),  # in ACICP: lr is gamma
+                    gamma=float(g),
                     T0=self.cfg.T0,
                     min_calib_size=self.cfg.min_calib_size,
                     warm_start=self.cfg.warm_start,
@@ -391,8 +391,8 @@ class AgACICP:
             if not bool(finite_mask[k]):
                 # assign neutral-ish loss; we set to 0 so it won't dominate centered loss
                 # (the mask will also effectively drop it due to weight=0 after normalization at predict time)
-                loss_low[k] = 0.0
-                loss_up[k] = 0.0
+                loss_low[k] = self.cfg.loss_clip
+                loss_up[k] = self.cfg.loss_clip
             else:
                 loss_low[k] = pinball_loss(yt, q=float(lows[k]), beta=self.beta_low)
                 loss_up[k] = pinball_loss(yt, q=float(ups[k]), beta=self.beta_up)

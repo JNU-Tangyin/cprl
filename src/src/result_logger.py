@@ -1,14 +1,21 @@
 import csv
 import os
 import pandas as pd
-from typing import Dict, Optional
+from typing import Dict
 
 
 class ResultLogger:
 
     CONFORMAL_HEADER = [
         "setting",
+        "dataset",
+        "base_model",
         "cp_mode",
+        "run_mode",
+        "alpha",
+        "seed",
+        "x_lag",
+        "ablation_mode",
         "target_coverage",
         "coverage",
         "coverage_gap",
@@ -17,18 +24,27 @@ class ResultLogger:
         "rcs",
         "point_mse",
         "point_mae",
+        "cache_path",
         "comment",
     ]
 
     ADAPTIVE_HEADER = [
         "setting",
+        "dataset",
+        "base_model",
         "cp_mode",
+        "run_mode",
+        "alpha",
+        "seed",
+        "x_lag",
+        "ablation_mode",
         "target_coverage",
         "worst_window_coverage",
         "width_step_mean",
         "width_std",
         "control_alpha_step_mean",
         "control_alpha_std",
+        "cache_path",
         "comment",
     ]
 
@@ -60,19 +76,32 @@ class ResultLogger:
             writer = csv.writer(f)
             writer.writerow(row)
 
-
     def log_conformal(
         self,
         setting: str,
+        dataset: str,
+        base_model: str,
         cp_mode: str,
+        run_mode: str,
+        alpha: float,
+        seed: int,
+        x_lag: int,
+        ablation_mode: str,
         target_coverage: float,
         metrics: Dict,
+        cache_path: str = "",
         comment: str = "",
     ):
-
         row = {
             "setting": setting,
+            "dataset": dataset,
+            "base_model": base_model,
             "cp_mode": cp_mode,
+            "run_mode": run_mode,
+            "alpha": alpha,
+            "seed": seed,
+            "x_lag": x_lag,
+            "ablation_mode": ablation_mode,
             "target_coverage": target_coverage,
             "coverage": metrics.get("coverage"),
             "coverage_gap": metrics.get("coverage_gap"),
@@ -81,6 +110,7 @@ class ResultLogger:
             "rcs": metrics.get("rcs"),
             "point_mse": metrics.get("point_mse"),
             "point_mae": metrics.get("point_mae"),
+            "cache_path": cache_path,
             "comment": comment,
         }
         self._append_row(self.conformal_csv_path, self.CONFORMAL_HEADER, row)
@@ -88,31 +118,44 @@ class ResultLogger:
     def log_adaptive(
         self,
         setting: str,
+        dataset: str,
+        base_model: str,
         cp_mode: str,
+        run_mode: str,
+        alpha: float,
+        seed: int,
+        x_lag: int,
+        ablation_mode: str,
         target_coverage: float,
         adaptive_metrics: Dict,
+        cache_path: str = "",
         comment: str = "",
     ):
-
         row = {
             "setting": setting,
+            "dataset": dataset,
+            "base_model": base_model,
             "cp_mode": cp_mode,
+            "run_mode": run_mode,
+            "alpha": alpha,
+            "seed": seed,
+            "x_lag": x_lag,
+            "ablation_mode": ablation_mode,
             "target_coverage": target_coverage,
             "worst_window_coverage": adaptive_metrics.get("worst_window_coverage"),
             "width_step_mean": adaptive_metrics.get("width_step_mean"),
             "width_std": adaptive_metrics.get("width_std"),
             "control_alpha_step_mean": adaptive_metrics.get("control_alpha_step_mean"),
             "control_alpha_std": adaptive_metrics.get("control_alpha_std"),
+            "cache_path": cache_path,
             "comment": comment,
         }
         self._append_row(self.adaptive_csv_path, self.ADAPTIVE_HEADER, row)
 
     def save(self):
-        """Compatibility hook (no-op)."""
         pass
 
     def to_excel(self):
-
         out = {}
 
         df1 = pd.read_csv(self.conformal_csv_path)

@@ -30,7 +30,7 @@ def build_conformal_predictor(args):
             alpha=alpha,
             T0=int(getattr(args, "aci_T0", calib_window_size)),
             min_calib_size=min_calib_size,
-            lr=float(getattr(args, "cp_lr", 0.01)),
+            gamma=float(getattr(args, "aci_gamma", 5e-4)),
             warm_start=int(getattr(args, "aci_warm_start", min_calib_size)),
             fallback_width=float(getattr(args, "aci_fallback_width", 3.0)),
             clip_alpha=bool(int(getattr(args, "aci_clip_alpha", 0))),

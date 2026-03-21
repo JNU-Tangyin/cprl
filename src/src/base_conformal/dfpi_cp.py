@@ -1,21 +1,27 @@
 import numpy as np
 
+
 class DFPI:
     """
-    Distribution-Free Predictive Inference (Split Conformal Regression)
-    (Lei et al., 2018)
+    Standard DFPI / Split Conformal Regression
+    compatible with ACP-style pipeline.
 
-    Workflow:
-      Calibration phase (I2):
+    Standard workflow:
+      Calibration phase:
         - collect residuals r_i = |y_i - yhat_i|
+      start_test():
+        - compute q_hat = k-th order statistic of calibration residuals
+          where k = ceil((m + 1) * (1 - alpha))
       Test phase:
-        - freeze q_hat = k-th order statistic of residuals where
-              k = ceil((m + 1) * (1 - alpha)),  m = |I2|
-        - predict interval for new x:
-              [yhat - q_hat, yhat + q_hat]
+        - return [yhat - q_hat, yhat + q_hat]
+        - do not update anymore
+
     """
 
-    def __init__(self, alpha: float, min_calib_size: int = 30):
+    def __init__(self, alpha: float, min_calib_size: int = 1):
+        if not (0.0 < float(alpha) < 1.0):
+            raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+
         self.alpha = float(alpha)
         self.initial_alpha = float(alpha)
         self.min_calib_size = int(min_calib_size)
@@ -33,32 +39,43 @@ class DFPI:
     @staticmethod
     def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
         """
-        Conformal quantile for split conformal regression:
-          m = len(residuals)
-          k = ceil((m + 1) * (1 - alpha))
-          q_hat = k-th smallest residual
+        Standard split conformal quantile:
+            k = ceil((m + 1) * (1 - alpha))
+            q_hat = k-th smallest residual
         """
         r = np.asarray(residuals, dtype=float)
         m = r.size
         if m == 0:
-            raise ValueError("Empty residuals.")
+            raise ValueError("Calibration residuals are empty.")
+
         k = int(np.ceil((m + 1) * (1.0 - alpha)))
         k = min(max(k, 1), m)  # clamp to [1, m]
-        return float(np.sort(r)[k - 1])
+
+        # k-th smallest element, 1-based -> 0-based index k-1
+        return float(np.partition(r, k - 1)[k - 1])
 
     def start_test(self):
-        """Freeze after calibration: compute q_hat from calibration residuals."""
-        if len(self.residuals) < self.min_calib_size:
+        """
+        Freeze after calibration and compute q_hat once.
+        """
+        m = len(self.residuals)
+        if m < self.min_calib_size:
             raise ValueError(
-                f"Not enough calibration residuals for DFPI: {len(self.residuals)} < {self.min_calib_size}."
+                f"Not enough calibration residuals for DFPI: {m} < {self.min_calib_size}."
             )
-        self.q_hat = self._conformal_quantile(self.residuals, self.alpha)
+
+        self.q_hat = self._conformal_quantile(
+            np.asarray(self.residuals, dtype=float),
+            self.alpha
+        )
         self._frozen = True
 
     def predict(self, base_prediction, model_uncertainty=None, **kwargs):
         """
-        Return DFPI interval around base prediction.
-        During calibration (not frozen), return a wide placeholder interval.
+        Before start_test():
+            return a dummy wide interval for pipeline compatibility.
+        After start_test():
+            return standard split conformal interval [yhat - q_hat, yhat + q_hat].
         """
         mu = float(base_prediction)
 
@@ -70,10 +87,13 @@ class DFPI:
 
     def update(self, y_true, y_pred, prediction_interval=None, **kwargs):
         """
-        Calibration phase: collect residuals on I2.
-        Test phase: do nothing (split conformal is frozen).
+        Calibration phase:
+            collect residuals r_i = |y_i - yhat_i|
+        Test phase:
+            do nothing (standard DFPI is frozen)
         """
         if self._frozen:
             return
+
         err = abs(float(y_true) - float(y_pred))
         self.residuals.append(err)

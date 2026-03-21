@@ -84,9 +84,9 @@ class ACICP:
     def __init__(
         self,
         alpha: float,
-        window_size: Optional[int] = None,   # kept for builder compatibility (unused)
+        window_size: Optional[int] = None,
         min_calib_size: int = 30,
-        lr: float = 0.01,                    # kept old arg name; treated as gamma
+        gamma: float = 5e-4,
         T0: int = 500,
         warm_start: int = 50,
         fallback_width: float = 3.0,
@@ -94,10 +94,10 @@ class ACICP:
         eps: float = 1e-6,
         seed: int = 0,
         **kwargs,
-    ):
+        ):
         self.config = ACIConfig(
             alpha0=float(alpha),
-            gamma=float(lr),
+            gamma=float(gamma),
             T0=int(T0),
             min_calib_size=int(min_calib_size),
             warm_start=int(warm_start),
