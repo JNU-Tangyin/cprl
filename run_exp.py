@@ -30,7 +30,7 @@ print(f"[Setup] Project root: {PROJECT_ROOT}")
 print(f"[Setup] Python path configured")
 
 # 导入并运行实验
-from exp.exp.exp_conformal import ExpConformal, get_args
+from exp.exp_conformal import ExpConformal, get_args
 
 if __name__ == "__main__":
     args = get_args()

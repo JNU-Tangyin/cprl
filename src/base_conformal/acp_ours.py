@@ -36,8 +36,11 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
         wass_reweight=bool(getattr(args, "wass_reweight", True)),
         wass_temperature=float(getattr(args, "wass_temperature", 0.1)),
 
-        # CQR-inspired single-score conformal
+        # CQR-inspired single-score conformal with online QR
         use_cqr_score=bool(getattr(args, "use_cqr_score", True)),
+        cqr_refit_every=int(getattr(args, "cqr_refit_every", 50)),
+        cqr_l2=float(getattr(args, "cqr_l2", 0.1)),
+        cqr_split_ratio=float(getattr(args, "cqr_split_ratio", 0.6)),
 
         # residual-space regime + warm-start
         regime_on_residuals=bool(getattr(args, "regime_on_residuals", True)),

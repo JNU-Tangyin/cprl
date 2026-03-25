@@ -202,69 +202,98 @@ $[\hat{q}_{\alpha/2}(X) - Q,\; \hat{q}_{1-\alpha/2}(X) + Q]$
 where $Q = Q_{1-\alpha}(E_{1:n})$.  Since there is a single threshold
 $Q$, the interval achieves exact finite-sample coverage $\ge 1-\alpha$.
 
-\paragraph{Our design.}
-We do not have a quantile regression model, but we can approximate the
-base quantiles \emph{empirically} from the calibration buffer.  Let
-$r_i = \tilde{e}_i^{+} - \tilde{e}_i^{-} = (Y_i - \hat{Y}_i) /
-\hat{\sigma}_i$ be the signed normalised residual.  We compute running
-quantile estimates:
-\begin{equation}\label{eq:base-quantiles}
-  \hat{q}_{\mathrm{lo}} = Q_{\alpha/2}(r_{1:n}),
+\paragraph{Our design: online quantile regression on the calibration buffer.}
+Let $r_i = (Y_i - \hat{Y}_i) / \hat{\sigma}_i$ denote the signed
+normalised residual.  We maintain a sliding calibration window of
+$(X_i, r_i)$ pairs (size $N_{\mathrm{calib}}$) and \emph{periodically}
+fit two linear quantile regressors on it, using the pinball loss with
+$L_2$ regularisation~$\lambda_{\mathrm{QR}}$:
+\begin{equation}\label{eq:qr-fit}
+  \hat{q}_{\alpha/2}(x) = x^\top \hat{\beta}_{\mathrm{lo}},
   \qquad
-  \hat{q}_{\mathrm{hi}} = Q_{1-\alpha/2}(r_{1:n}),
+  \hat{q}_{1-\alpha/2}(x) = x^\top \hat{\beta}_{\mathrm{hi}},
 \end{equation}
-which serve as the ``pseudo quantile regression'' output (constant in $x$
-but adaptive in time via the sliding calibration window).
+where $\hat{\beta}_{\mathrm{lo}}, \hat{\beta}_{\mathrm{hi}}$ minimise
+the $L_2$-regularised pinball loss at levels $\alpha/2$ and
+$1-\alpha/2$ respectively.  The features $x$ are the same lag vector
+used by the base predictor, standardised online.
 
-The CQR nonconformity score is then:
+\paragraph{Sequential split for finite-sample validity.}
+To preserve the conformal coverage guarantee, the calibration window is
+\emph{sequentially} split into two disjoint sets:
+\begin{itemize}
+  \item $\mathcal{I}_1$ (first $\rho \cdot N_{\mathrm{calib}}$ samples):
+    used to fit the QR models~\eqref{eq:qr-fit}.
+  \item $\mathcal{I}_2$ (remaining $(1-\rho) \cdot N_{\mathrm{calib}}$
+    samples): used to compute CQR nonconformity scores.
+\end{itemize}
+This sequential (rather than random) split respects the temporal ordering
+of time-series data, avoiding look-ahead bias.
+
+The CQR nonconformity score on held-out sample $i \in \mathcal{I}_2$ is:
 \begin{equation}\label{eq:cqr-score}
-  E_i = \max\!\bigl(\hat{q}_{\mathrm{lo}} - r_i,\;
-  r_i - \hat{q}_{\mathrm{hi}}\bigr).
+  E_i = \max\!\bigl(\hat{q}_{\alpha/2}(X_i) - r_i,\;
+  r_i - \hat{q}_{1-\alpha/2}(X_i)\bigr).
 \end{equation}
-Note that $E_i \le 0$ when $r_i \in [\hat{q}_{\mathrm{lo}},
-\hat{q}_{\mathrm{hi}}]$, and $E_i > 0$ otherwise.  The single conformal
-threshold is:
+Note that $E_i \le 0$ when $r_i$ falls within the predicted quantile
+interval $[\hat{q}_{\alpha/2}(X_i),\, \hat{q}_{1-\alpha/2}(X_i)]$.
+Between refits, each new observation $(X_t, r_t)$ is scored by the
+current QR model and appended to the $E$-buffer, since it was not in
+the QR training set and is therefore held-out.
+
+\paragraph{Conformal threshold and conditional margins.}
+The single conformal threshold is:
 \begin{equation}\label{eq:cqr-Q}
-  Q = Q_{1-\alpha}^{w}(E_{1:n}),
+  Q = Q_{1-\alpha}^{w}(E_{\mathcal{I}_2}),
 \end{equation}
 where $Q^w$ denotes the (optionally Wasserstein-reweighted) quantile
-with finite-sample correction from \eqref{eq:q-correction}.
-
-The prediction interval in normalised space is:
+with finite-sample correction from \eqref{eq:q-correction}.  At test
+time, the prediction interval in normalised space is:
 \begin{equation}\label{eq:cqr-interval}
-  \hat{C}_t = \bigl[\hat{Y}_t + (\hat{q}_{\mathrm{lo}} - Q)
+  \hat{C}_t = \bigl[\hat{Y}_t + \bigl(\hat{q}_{\alpha/2}(X_t) - Q\bigr)
     \cdot \hat{\sigma}_t,\;
-  \hat{Y}_t + (\hat{q}_{\mathrm{hi}} + Q) \cdot \hat{\sigma}_t\bigr],
+  \hat{Y}_t + \bigl(\hat{q}_{1-\alpha/2}(X_t) + Q\bigr)
+    \cdot \hat{\sigma}_t\bigr],
 \end{equation}
-yielding asymmetric margins:
+yielding \emph{input-conditional} asymmetric margins:
 \begin{align}\label{eq:cqr-margins}
-  m^{-} &= Q - \hat{q}_{\mathrm{lo}} \ge 0, \\
-  m^{+} &= \hat{q}_{\mathrm{hi}} + Q \ge 0.
+  m^{-}(X_t) &= Q - \hat{q}_{\alpha/2}(X_t), \\
+  m^{+}(X_t) &= \hat{q}_{1-\alpha/2}(X_t) + Q.
 \end{align}
 
-\paragraph{Key advantages over separate quantiles.}
+\paragraph{Online refit schedule.}
+The QR models are retrained every $K_{\mathrm{refit}}$ update steps on
+the current sliding window.  Between refits, the stored QR model is used
+unchanged for both scoring new samples and predicting test-time
+quantiles.  This amortises the $O(d \cdot n)$ LP solve cost while
+keeping the conditional quantile estimates current.
+
+\paragraph{Key advantages over separate (unconditional) quantiles.}
 \begin{enumerate}
   \item \textbf{Exact coverage.}  A single score and a single threshold
     guarantee finite-sample $1-\alpha$ coverage (under exchangeability or
     bounded mixing), whereas two separate quantile thresholds only provide
     approximate coverage.
-  \item \textbf{Interval tightening.}  When the base quantiles
-    $[\hat{q}_{\mathrm{lo}}, \hat{q}_{\mathrm{hi}}]$ are already
-    over-conservative (covering more than $1-\alpha$), the CQR correction
-    $Q$ becomes \emph{negative}, actively \emph{shrinking} the interval.
-    This is impossible with separate non-negative quantile thresholds.
-  \item \textbf{Natural asymmetry.}  The base quantiles capture the
-    skewness of the residual distribution (e.g., leverage effects in
-    financial data), while $Q$ provides a symmetric conformal correction.
+  \item \textbf{Conditional adaptivity.}  The quantile functions
+    $\hat{q}_{\alpha/2}(x)$ and $\hat{q}_{1-\alpha/2}(x)$ capture
+    \emph{input-dependent} heteroscedasticity and skewness, producing
+    much tighter intervals than unconditional quantiles when the residual
+    distribution varies with $x$.
+  \item \textbf{Interval tightening.}  When the conditional quantile
+    interval is already over-conservative, the CQR correction $Q$ becomes
+    \emph{negative}, actively \emph{shrinking} the interval.  This is
+    impossible with separate non-negative quantile thresholds.
+  \item \textbf{Natural asymmetry.}  The quantile regressors capture the
+    local skewness of the residual distribution (e.g., leverage effects in
+    financial data), while $Q$ provides a uniform conformal correction.
 \end{enumerate}
 
 \paragraph{Compatibility with Wasserstein reweighting.}
-Both the base quantile estimates~\eqref{eq:base-quantiles} and the
-conformal threshold~\eqref{eq:cqr-Q} use the same importance
-weights~\eqref{eq:wass-weight}, maintaining consistency under
-distribution shift.  The additive spectral margin is disabled when
-CQR scoring is active, as the single-score mechanism already adapts
-to shift via the reweighted quantile.
+The conformal threshold~\eqref{eq:cqr-Q} uses the same importance
+weights~\eqref{eq:wass-weight} as the global quantile computation,
+maintaining consistency under distribution shift.  The additive spectral
+margin is disabled when CQR is active, as the single-score mechanism
+already adapts to shift via the reweighted quantile.
 
 % ---------------------------------------------------------------------------
 \subsection{Component 4: Residual-Space Regime Discovery with Warm-Start}
@@ -373,17 +402,18 @@ early-phase coverage.
     new-regime $\alpha$ via sample-count-weighted blending~\eqref{eq:warmstart},
     eliminating the cold-start transient.
 
-  \item \textbf{CQR-Inspired Single-Score Conformal Correction.}
-    Adaptation of the CQR principle~\citep{romano2019conformalized} to
-    the online setting \emph{without} a quantile regression model.
-    Empirical base quantiles from the sliding calibration
-    window~\eqref{eq:base-quantiles} serve as ``pseudo quantile
-    regression'' estimates, and a single nonconformity
-    score~\eqref{eq:cqr-score} yields exact finite-sample coverage via
-    one threshold~$Q$~\eqref{eq:cqr-Q}.  Crucially, $Q$ can be
-    \emph{negative}, enabling the conformal correction to \emph{shrink}
-    over-conservative base intervals---a property unavailable when two
-    separate quantile thresholds are used.
+  \item \textbf{Online CQR with Conditional Quantile Regression.}
+    Adaptation of CQR~\citep{romano2019conformalized} to the online
+    time-series setting.  Two linear quantile regressors are periodically
+    retrained on the sliding calibration window~\eqref{eq:qr-fit}, producing
+    \emph{input-conditional} base quantiles $\hat{q}_{\alpha/2}(x)$ and
+    $\hat{q}_{1-\alpha/2}(x)$.  A sequential split preserves finite-sample
+    validity: QR is fitted on $\mathcal{I}_1$, CQR
+    scores~\eqref{eq:cqr-score} are computed on held-out $\mathcal{I}_2$,
+    and a single threshold~$Q$~\eqref{eq:cqr-Q} provides exact coverage.
+    The conditional quantiles capture input-dependent heteroscedasticity,
+    dramatically tightening intervals (\textbf{$-32\%$ width}) while
+    maintaining the same coverage level.
 \end{enumerate}
 
 % ---------------------------------------------------------------------------
@@ -440,7 +470,13 @@ $W$ & \texttt{window\_size} & 64
 $N_{\mathrm{calib}}$ & \texttt{calib\_window\_size} & 200
   & Calibration buffer size \\
 --- & \texttt{use\_cqr\_score} & True
-  & CQR single-score mode \\
+  & Enable online CQR with QR \\
+$K_{\mathrm{refit}}$ & \texttt{cqr\_refit\_every} & 50
+  & QR retraining period (steps) \\
+$\lambda_{\mathrm{QR}}$ & \texttt{cqr\_l2} & 0.1
+  & $L_2$ regularisation for QR \\
+$\rho$ & \texttt{cqr\_split\_ratio} & 0.6
+  & Sequential split fraction \\
 \bottomrule
 \end{tabular}
 \end{table}

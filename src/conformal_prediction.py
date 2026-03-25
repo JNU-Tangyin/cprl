@@ -7,6 +7,12 @@ from collections import deque
 
 import numpy as np
 
+try:
+    from sklearn.linear_model import QuantileRegressor as _QR
+    _HAS_QR = True
+except ImportError:
+    _HAS_QR = False
+
 @dataclass
 class ConformalPredictionConfig:
     initial_alpha: float = 0.1
@@ -47,6 +53,9 @@ class ConformalPredictionConfig:
 
     # CQR-inspired single-score conformal (Romano et al., 2019)
     use_cqr_score: bool = True
+    cqr_refit_every: int = 50       # retrain QR model every N update steps
+    cqr_l2: float = 0.1             # L2 regularisation for QuantileRegressor
+    cqr_split_ratio: float = 0.6    # sequential-split fraction for QR training
 
     # residual-space regime discovery + warm-start
     regime_on_residuals: bool = True
@@ -552,6 +561,18 @@ class AdaptiveConformalPredictor:
         self._k_t_global: int = 0
         self._k_t_by_regime: Dict[int, int] = {r: 0 for r in range(R)}
 
+        # CQR online quantile regression state
+        self._cqr_X_buf: List[np.ndarray] = []       # stored features  (sliding)
+        self._cqr_r_buf: List[float] = []             # signed normalised residuals
+        self._cqr_E_buf: Deque[float] = deque(maxlen=Wc)  # CQR scores (held-out)
+        self._cqr_s_buf: Deque[float] = deque(maxlen=Wc)  # spectral scores aligned with E
+        self._cqr_model_lo = None   # QuantileRegressor for α/2
+        self._cqr_model_hi = None   # QuantileRegressor for 1-α/2
+        self._cqr_x_mean: Optional[np.ndarray] = None
+        self._cqr_x_std: Optional[np.ndarray] = None
+        self._cqr_step: int = 0
+        self._cqr_fitted: bool = False
+
     @property
     def alpha(self) -> float:
         if hasattr(self, "alpha_history") and len(self.alpha_history) > 0:
@@ -598,6 +619,69 @@ class AdaptiveConformalPredictor:
             self._k_scale_by_regime[rid],
         )
         
+    # ---------- CQR online quantile regression ----------
+    def _refit_cqr(self) -> None:
+        """Train QR on I1 (sequential split), populate E_buf from I2."""
+        if not _HAS_QR:
+            return
+        n = len(self._cqr_r_buf)
+        min_n = max(int(self.config.min_calib_size) * 2, 40)
+        if n < min_n:
+            return
+
+        X = np.array(self._cqr_X_buf, dtype=float)
+        r = np.array(self._cqr_r_buf, dtype=float)
+
+        # sequential split (time-series: no look-ahead)
+        n1 = int(n * float(self.config.cqr_split_ratio))
+        n1 = max(10, min(n1, n - 10))
+        X1, r1 = X[:n1], r[:n1]
+        X2, r2 = X[n1:], r[n1:]
+
+        # standardise features using I1
+        self._cqr_x_mean = X1.mean(axis=0)
+        self._cqr_x_std = np.maximum(X1.std(axis=0), 1e-8)
+        X1s = (X1 - self._cqr_x_mean) / self._cqr_x_std
+        X2s = (X2 - self._cqr_x_mean) / self._cqr_x_std
+
+        a = float(self.config.initial_alpha)
+        l2 = float(self.config.cqr_l2)
+        try:
+            self._cqr_model_lo = _QR(quantile=a / 2.0, alpha=l2, solver="highs")
+            self._cqr_model_hi = _QR(quantile=1.0 - a / 2.0, alpha=l2, solver="highs")
+            self._cqr_model_lo.fit(X1s, r1)
+            self._cqr_model_hi.fit(X1s, r1)
+        except Exception:
+            self._cqr_fitted = False
+            return
+
+        # CQR scores on I2 (held-out)
+        qlo = self._cqr_model_lo.predict(X2s)
+        qhi = self._cqr_model_hi.predict(X2s)
+        E = np.maximum(qlo - r2, r2 - qhi)
+
+        # populate E_buf and aligned s_buf
+        self._cqr_E_buf.clear()
+        self._cqr_s_buf.clear()
+        s_global = list(self.calib_s_global)
+        s_offset = max(0, len(s_global) - n)  # align with _cqr_r_buf
+        for i in range(len(E)):
+            self._cqr_E_buf.append(float(E[i]))
+            idx = s_offset + n1 + i
+            sv = float(s_global[idx]) if idx < len(s_global) else 0.0
+            self._cqr_s_buf.append(sv)
+
+        self._cqr_fitted = True
+
+    def _cqr_score_one(self, x: np.ndarray, r: float) -> Optional[float]:
+        """Compute CQR score for a single new held-out sample."""
+        if not self._cqr_fitted:
+            return None
+        xs = ((x - self._cqr_x_mean) / self._cqr_x_std).reshape(1, -1)
+        qlo = float(self._cqr_model_lo.predict(xs)[0])
+        qhi = float(self._cqr_model_hi.predict(xs)[0])
+        return float(max(qlo - r, r - qhi))
+
     # ---------- k refresh ----------
     def _maybe_refresh_k(self, rid: int) -> None:
         def compute_k(e_lo_buf, e_hi_buf, s_buf) -> float:
@@ -749,6 +833,55 @@ class AdaptiveConformalPredictor:
         e_lo, e_hi, s, _, k = self._buffers_regime(rid)
         return self._margins_from_buffers(e_lo, e_hi, s, k, alpha, model_uncertainty)
 
+    def _margins_cqr(
+        self, alpha: float, model_uncertainty: float, x_new
+    ) -> Tuple[float, float, float]:
+        """CQR margins using online QR: q̂_lo(x), q̂_hi(x) + conformal Q."""
+        a = float(np.clip(alpha, float(self.config.alpha_min), float(self.config.alpha_max)))
+        min_E = int(self.config.min_calib_size)
+
+        # fallback if E_buf too small
+        if len(self._cqr_E_buf) < min_E:
+            return self._margins_global(alpha=alpha, model_uncertainty=model_uncertainty)
+
+        # conditional quantile predictions for x_new
+        x_flat = np.asarray(x_new, dtype=float).ravel()
+        xs = ((x_flat - self._cqr_x_mean) / self._cqr_x_std).reshape(1, -1)
+        q_base_lo = float(self._cqr_model_lo.predict(xs)[0])
+        q_base_hi = float(self._cqr_model_hi.predict(xs)[0])
+
+        E_arr = np.asarray(list(self._cqr_E_buf), dtype=float)
+        n_E = len(E_arr)
+
+        # Wasserstein reweighting on CQR scores
+        use_wass = bool(getattr(self.config, 'wass_reweight', False))
+        if use_wass and self.config.use_spectral and len(self._cqr_s_buf) >= n_E:
+            s_arr = np.asarray(list(self._cqr_s_buf), dtype=float)[-n_E:]
+            s_arr = np.clip(s_arr, 0.0, None)
+            rev_cum = np.cumsum(s_arr[::-1])[::-1]
+            drift = np.zeros(n_E, dtype=float)
+            if n_E > 1:
+                drift[:-1] = rev_cum[1:]
+            temp = float(getattr(self.config, 'wass_temperature', 0.1))
+            w = np.exp(-temp * drift)
+            Q = float(_weighted_quantile(E_arr, w, 1.0 - a))
+        else:
+            Q = float(np.quantile(E_arr, 1.0 - a))
+
+        # asymmetric margins in normalised space
+        m_lo = max(0.0, Q - q_base_lo)
+        m_hi = max(0.0, q_base_hi + Q)
+
+        # spectral quantile for diagnostics
+        q_s = 0.0
+        if len(self.calib_s_global) >= int(getattr(self.config, "min_spectral_size", self.config.min_calib_size)):
+            s = np.asarray(list(self.calib_s_global), float)
+            s = s[np.isfinite(s)]
+            if len(s) > 0:
+                q_s = float(np.quantile(s, 1.0 - a))
+
+        return float(m_lo), float(m_hi), float(q_s)
+
     def _extract_price_window(self, x) -> Optional[np.ndarray]:
         if x is None:
             return None
@@ -823,7 +956,15 @@ class AdaptiveConformalPredictor:
         else:
             alpha = float(self._alpha.choose(rid, use_regime=use_r))
 
-        if use_r:
+        # CQR with fitted QR: use conditional margins from global CQR E_buf
+        # (QR already captures x-conditional structure; regime adapts α only)
+        cqr_active = (bool(getattr(self.config, 'use_cqr_score', False))
+                      and self._cqr_fitted and x is not None)
+        if cqr_active:
+            m_lo, m_hi, q_s = self._margins_cqr(
+                alpha=alpha, model_uncertainty=unc, x_new=x)
+            k_used = float(self._k_scale_global)
+        elif use_r:
             m_lo, m_hi, q_s = self._margins_regime(rid, alpha=alpha, model_uncertainty=unc)
             k_used = float(self._k_scale_by_regime[rid])
         else:
@@ -846,6 +987,7 @@ class AdaptiveConformalPredictor:
             "k_used": float(k_used),
             "lower": float(lower),
             "upper": float(upper),
+            "x_raw": x,  # stored for CQR update
         }
 
         self._last_alpha_sampled = float(alpha)
@@ -921,6 +1063,32 @@ class AdaptiveConformalPredictor:
         self.k_history.append(float(p["k_used"]))
         self.spectral_q_history.append(float(q_s))
         self.use_regime_history.append(bool(use_r_pred))
+
+        # --- CQR online QR: store (x, r) and maintain E_buf ---
+        use_cqr = bool(getattr(self.config, 'use_cqr_score', False)) and _HAS_QR
+        x_raw = p.get("x_raw", None)
+        if use_cqr and x_raw is not None:
+            r_signed = float(e_hi - e_lo)  # signed normalised residual
+            x_flat = np.asarray(x_raw, dtype=float).ravel()
+            self._cqr_X_buf.append(x_flat)
+            self._cqr_r_buf.append(r_signed)
+            Wc = int(self.config.calib_window_size)
+            if len(self._cqr_X_buf) > Wc:
+                self._cqr_X_buf = self._cqr_X_buf[-Wc:]
+                self._cqr_r_buf = self._cqr_r_buf[-Wc:]
+
+            # if QR already fitted, score this new held-out sample
+            if self._cqr_fitted:
+                E_new = self._cqr_score_one(x_flat, r_signed)
+                if E_new is not None:
+                    self._cqr_E_buf.append(E_new)
+                    s_last = float(self.calib_s_global[-1]) if len(self.calib_s_global) > 0 else 0.0
+                    self._cqr_s_buf.append(s_last)
+
+            # periodic refit
+            self._cqr_step += 1
+            if self._cqr_step % int(self.config.cqr_refit_every) == 0:
+                self._refit_cqr()
 
         self._pending = None
 
