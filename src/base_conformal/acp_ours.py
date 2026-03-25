@@ -34,7 +34,10 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
 
         # Wasserstein reweighting
         wass_reweight=bool(getattr(args, "wass_reweight", True)),
-        wass_temperature=float(getattr(args, "wass_temperature", 1.0)),
+        wass_temperature=float(getattr(args, "wass_temperature", 0.1)),
+
+        # CQR-inspired single-score conformal
+        use_cqr_score=bool(getattr(args, "use_cqr_score", True)),
 
         # residual-space regime + warm-start
         regime_on_residuals=bool(getattr(args, "regime_on_residuals", True)),
@@ -69,6 +72,8 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
         cfg.wass_reweight = False
     elif mode == "M5":  # no score normalization (raw residuals)
         pass  # controlled in update() by unc; needs flag if desired
+    elif mode == "M6":  # no CQR score (legacy separate quantiles)
+        cfg.use_cqr_score = False
     else:
         raise ValueError(f"Unknown ablation_mode: {mode}")
 

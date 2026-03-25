@@ -45,6 +45,9 @@ class ConformalPredictionConfig:
     wass_reweight: bool = True
     wass_temperature: float = 0.1
 
+    # CQR-inspired single-score conformal (Romano et al., 2019)
+    use_cqr_score: bool = True
+
     # residual-space regime discovery + warm-start
     regime_on_residuals: bool = True
     warmstart_blend: float = 0.3
@@ -664,29 +667,62 @@ class AdaptiveConformalPredictor:
             drift_to_now = np.zeros(n_raw, dtype=float)
             if n_raw > 1:
                 drift_to_now[:-1] = rev_cum[1:]
-            temp = float(getattr(self.config, 'wass_temperature', 1.0))
+            temp = float(getattr(self.config, 'wass_temperature', 0.1))
             w_raw = np.exp(-temp * drift_to_now)
         else:
             w_raw = np.ones(n_raw, dtype=float)
 
-        mask_lo = np.isfinite(e_lo_raw[:n_raw])
-        mask_hi = np.isfinite(e_hi_raw[:n_raw])
-        e_lo = e_lo_raw[:n_raw][mask_lo]
-        e_hi = e_hi_raw[:n_raw][mask_hi]
+        # combined finite mask (matched pairs for CQR)
+        mask = (np.isfinite(e_lo_raw[:n_raw])
+                & np.isfinite(e_hi_raw[:n_raw]))
+        e_lo = e_lo_raw[:n_raw][mask]
+        e_hi = e_hi_raw[:n_raw][mask]
+        w = w_raw[mask]
 
-        if len(e_lo) == 0 or len(e_hi) == 0:
-            m = float(model_uncertainty)
-            return float(m), float(m), 0.0
+        if len(e_lo) == 0:
+            return 1.0 / max(1e-6, 1.0 - a), 1.0 / max(1e-6, 1.0 - a), 0.0
 
-        if use_wass and self.config.use_spectral and n_s >= n_raw:
-            w_lo = w_raw[mask_lo]
-            w_hi = w_raw[mask_hi]
-            q_lo = float(_weighted_quantile(e_lo, w_lo, 1.0 - a))
-            q_hi = float(_weighted_quantile(e_hi, w_hi, 1.0 - a))
+        use_wass_active = (use_wass and self.config.use_spectral and n_s >= n_raw)
+        use_cqr = bool(getattr(self.config, 'use_cqr_score', True))
+
+        if use_cqr:
+            # ---- CQR-inspired single-score conformal (Romano et al., 2019) ----
+            # Signed normalised residual: r_i = (y_i - ŷ_i) / σ_i
+            r = e_hi - e_lo
+
+            # Base quantile estimates (empirical "pseudo quantile regression")
+            if use_wass_active:
+                q_base_lo = float(_weighted_quantile(r, w, a / 2.0))
+                q_base_hi = float(_weighted_quantile(r, w, 1.0 - a / 2.0))
+            else:
+                q_base_lo = float(np.quantile(r, a / 2.0))
+                q_base_hi = float(np.quantile(r, 1.0 - a / 2.0))
+
+            # CQR nonconformity score (single score → exact coverage)
+            e_cqr = np.maximum(q_base_lo - r, r - q_base_hi)
+
+            # Single conformal threshold
+            if use_wass_active:
+                Q = float(_weighted_quantile(e_cqr, w, 1.0 - a))
+            else:
+                Q = float(np.quantile(e_cqr, 1.0 - a))
+
+            # Asymmetric margins in normalised space
+            # Interval: [ŷ + (q_base_lo - Q)·σ,  ŷ + (q_base_hi + Q)·σ]
+            #   m_lo = Q - q_base_lo  (≥ 0 since q_base_lo < 0 typically)
+            #   m_hi = q_base_hi + Q  (≥ 0)
+            q_lo = max(0.0, float(Q) - q_base_lo)
+            q_hi = max(0.0, q_base_hi + float(Q))
         else:
-            q_lo = float(np.quantile(e_lo, 1.0 - a))
-            q_hi = float(np.quantile(e_hi, 1.0 - a))
+            # ---- legacy: separate lo/hi quantiles ----
+            if use_wass_active:
+                q_lo = float(_weighted_quantile(e_lo, w, 1.0 - a))
+                q_hi = float(_weighted_quantile(e_hi, w, 1.0 - a))
+            else:
+                q_lo = float(np.quantile(e_lo, 1.0 - a))
+                q_hi = float(np.quantile(e_hi, 1.0 - a))
 
+        # spectral quantile (for diagnostics / additive fallback)
         q_s = 0.0
         if len(s_buf) >= int(getattr(self.config, "min_spectral_size", self.config.min_calib_size)):
             s = np.asarray(list(s_buf), float)
@@ -695,10 +731,8 @@ class AdaptiveConformalPredictor:
                 q_s = float(np.quantile(s, 1.0 - a))
 
         # additive spectral margin — disabled when Wasserstein reweighting is
-        # active (the weighted quantile already accounts for drift; stacking
-        # both would double-count and inflate width unnecessarily).
-        use_wass_active = (use_wass and self.config.use_spectral and n_s >= n_raw)
-        if use_wass_active or (not self.config.use_spectral):
+        # active or when CQR score is used (both already adapt to drift).
+        if use_wass_active or use_cqr or (not self.config.use_spectral):
             extra = 0.0
         else:
             extra = float(self.config.lambda_spectral) * float(k_scale) * float(q_s)

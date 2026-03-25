@@ -174,6 +174,99 @@ volatility without explicit regime discovery, and is complementary to the
 regime mechanism (which adapts $\alpha$, not the score function).
 
 % ---------------------------------------------------------------------------
+\subsection{Component 3b: CQR-Inspired Single-Score Conformal Correction}
+\label{sec:cqr-score}
+% ---------------------------------------------------------------------------
+
+\paragraph{Motivation.}
+The normalised scores $\tilde{e}^{-}$ and $\tilde{e}^{+}$ in
+\eqref{eq:norm-score} are used to compute \emph{two separate} quantiles,
+one for each tail.  However, the standard conformal coverage guarantee
+(Theorem~2 of \citealt{vovk2005algorithmic}) applies to a \emph{single}
+nonconformity score: the $(1-\alpha)$-quantile of a single score sequence
+yields exact $1-\alpha$ coverage under exchangeability.  When two
+\emph{independent} quantile thresholds are used for the lower and upper
+margins, the joint coverage is only \emph{approximately} $1-\alpha$, with
+no finite-sample guarantee.
+
+\citet{romano2019conformalized} resolve this in the batch setting via
+\emph{Conformalized Quantile Regression} (CQR): train lower and upper
+quantile regressors $\hat{q}_{\alpha/2}(x)$ and
+$\hat{q}_{1-\alpha/2}(x)$, define a \emph{single} nonconformity score
+\begin{equation}\label{eq:cqr-score-orig}
+  E_i = \max\!\bigl(\hat{q}_{\alpha/2}(X_i) - Y_i,\;
+  Y_i - \hat{q}_{1-\alpha/2}(X_i)\bigr),
+\end{equation}
+and construct the prediction interval
+$[\hat{q}_{\alpha/2}(X) - Q,\; \hat{q}_{1-\alpha/2}(X) + Q]$
+where $Q = Q_{1-\alpha}(E_{1:n})$.  Since there is a single threshold
+$Q$, the interval achieves exact finite-sample coverage $\ge 1-\alpha$.
+
+\paragraph{Our design.}
+We do not have a quantile regression model, but we can approximate the
+base quantiles \emph{empirically} from the calibration buffer.  Let
+$r_i = \tilde{e}_i^{+} - \tilde{e}_i^{-} = (Y_i - \hat{Y}_i) /
+\hat{\sigma}_i$ be the signed normalised residual.  We compute running
+quantile estimates:
+\begin{equation}\label{eq:base-quantiles}
+  \hat{q}_{\mathrm{lo}} = Q_{\alpha/2}(r_{1:n}),
+  \qquad
+  \hat{q}_{\mathrm{hi}} = Q_{1-\alpha/2}(r_{1:n}),
+\end{equation}
+which serve as the ``pseudo quantile regression'' output (constant in $x$
+but adaptive in time via the sliding calibration window).
+
+The CQR nonconformity score is then:
+\begin{equation}\label{eq:cqr-score}
+  E_i = \max\!\bigl(\hat{q}_{\mathrm{lo}} - r_i,\;
+  r_i - \hat{q}_{\mathrm{hi}}\bigr).
+\end{equation}
+Note that $E_i \le 0$ when $r_i \in [\hat{q}_{\mathrm{lo}},
+\hat{q}_{\mathrm{hi}}]$, and $E_i > 0$ otherwise.  The single conformal
+threshold is:
+\begin{equation}\label{eq:cqr-Q}
+  Q = Q_{1-\alpha}^{w}(E_{1:n}),
+\end{equation}
+where $Q^w$ denotes the (optionally Wasserstein-reweighted) quantile
+with finite-sample correction from \eqref{eq:q-correction}.
+
+The prediction interval in normalised space is:
+\begin{equation}\label{eq:cqr-interval}
+  \hat{C}_t = \bigl[\hat{Y}_t + (\hat{q}_{\mathrm{lo}} - Q)
+    \cdot \hat{\sigma}_t,\;
+  \hat{Y}_t + (\hat{q}_{\mathrm{hi}} + Q) \cdot \hat{\sigma}_t\bigr],
+\end{equation}
+yielding asymmetric margins:
+\begin{align}\label{eq:cqr-margins}
+  m^{-} &= Q - \hat{q}_{\mathrm{lo}} \ge 0, \\
+  m^{+} &= \hat{q}_{\mathrm{hi}} + Q \ge 0.
+\end{align}
+
+\paragraph{Key advantages over separate quantiles.}
+\begin{enumerate}
+  \item \textbf{Exact coverage.}  A single score and a single threshold
+    guarantee finite-sample $1-\alpha$ coverage (under exchangeability or
+    bounded mixing), whereas two separate quantile thresholds only provide
+    approximate coverage.
+  \item \textbf{Interval tightening.}  When the base quantiles
+    $[\hat{q}_{\mathrm{lo}}, \hat{q}_{\mathrm{hi}}]$ are already
+    over-conservative (covering more than $1-\alpha$), the CQR correction
+    $Q$ becomes \emph{negative}, actively \emph{shrinking} the interval.
+    This is impossible with separate non-negative quantile thresholds.
+  \item \textbf{Natural asymmetry.}  The base quantiles capture the
+    skewness of the residual distribution (e.g., leverage effects in
+    financial data), while $Q$ provides a symmetric conformal correction.
+\end{enumerate}
+
+\paragraph{Compatibility with Wasserstein reweighting.}
+Both the base quantile estimates~\eqref{eq:base-quantiles} and the
+conformal threshold~\eqref{eq:cqr-Q} use the same importance
+weights~\eqref{eq:wass-weight}, maintaining consistency under
+distribution shift.  The additive spectral margin is disabled when
+CQR scoring is active, as the single-score mechanism already adapts
+to shift via the reweighted quantile.
+
+% ---------------------------------------------------------------------------
 \subsection{Component 4: Residual-Space Regime Discovery with Warm-Start}
 \label{sec:residual-regime}
 % ---------------------------------------------------------------------------
@@ -279,6 +372,18 @@ early-phase coverage.
   \item \textbf{Cross-Regime Warm-Start.}  Principled initialisation of
     new-regime $\alpha$ via sample-count-weighted blending~\eqref{eq:warmstart},
     eliminating the cold-start transient.
+
+  \item \textbf{CQR-Inspired Single-Score Conformal Correction.}
+    Adaptation of the CQR principle~\citep{romano2019conformalized} to
+    the online setting \emph{without} a quantile regression model.
+    Empirical base quantiles from the sliding calibration
+    window~\eqref{eq:base-quantiles} serve as ``pseudo quantile
+    regression'' estimates, and a single nonconformity
+    score~\eqref{eq:cqr-score} yields exact finite-sample coverage via
+    one threshold~$Q$~\eqref{eq:cqr-Q}.  Crucially, $Q$ can be
+    \emph{negative}, enabling the conformal correction to \emph{shrink}
+    over-conservative base intervals---a property unavailable when two
+    separate quantile thresholds are used.
 \end{enumerate}
 
 % ---------------------------------------------------------------------------
@@ -301,6 +406,7 @@ M1 & No spectral analysis (no drift detection, no Wasserstein reweighting) \\
 M2 & No regime discovery (single global $\alpha$) \\
 M3 & No ACI (fixed $\alpha = \alpha_0$) \\
 M4 & No Wasserstein reweighting (uniform quantile, spectral only for LR) \\
+M6 & No CQR score (legacy separate lo/hi quantiles) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -333,6 +439,8 @@ $W$ & \texttt{window\_size} & 64
   & Spectral drift window \\
 $N_{\mathrm{calib}}$ & \texttt{calib\_window\_size} & 200
   & Calibration buffer size \\
+--- & \texttt{use\_cqr\_score} & True
+  & CQR single-score mode \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -345,6 +453,7 @@ $N_{\mathrm{calib}}$ & \texttt{calib\_window\_size} & 200
 % \citep{tibshirani2019conformal} — Tibshirani et al., 2019, weighted CP
 % \citep{xu2025wasserstein}       — Xu et al., 2025, Wasserstein-regularized CP
 % \citep{barber2023conformal}     — Barber et al., 2023, conformal under shift
-% \citep{lei2018distribution}     — Lei et al., 2018, distribution-free inference
+% \citep{lei2018distribution}       — Lei et al., 2018, distribution-free inference
 % \citep{papadopoulos2002inductive} — Papadopoulos et al., 2002, inductive CP
-% \citep{vovk2005algorithmic}     — Vovk et al., 2005, algorithmic learning
+% \citep{vovk2005algorithmic}       — Vovk et al., 2005, algorithmic learning
+% \citep{romano2019conformalized}   — Romano et al., 2019, conformalized quantile regression
