@@ -22,7 +22,21 @@ plt.rcParams['savefig.dpi'] = 300
 plt.rcParams['savefig.bbox'] = 'tight'
 
 # Nature-style color palette
-NATURE_COLORS = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F', '#8491B4', '#91D1C2', '#DC0000']
+
+Chinese_Traditional = [
+    "#d22521",  # 紅酒
+    "#4393c4",  # 紫草
+    "#ffdd5f",  # 淡黃
+    "#f3f2f0",  # 淡白
+    "#47443d",  # 黑
+    "#3f6937",  # 深绿
+    "#edb0c2",  # 粉
+    "#9f8469",  # 赭
+    "#3e8f88",  # 翠
+    "#a7559f",  # 紫
+]
+
+NATURE_COLORS = Chinese_Traditional # ['#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F', '#8491B4', '#91D1C2', '#DC0000']
 
 print("=" * 80)
 print("CONFORMAL PREDICTION RESULTS ANALYSIS")
