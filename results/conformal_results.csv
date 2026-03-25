@@ -1,2 +1,0 @@
-timestamp,setting,mse,mae,coverage,avg_width,final_alpha,calib_mse,data_path,cp_mode,comment
-2026-01-22 19:09:31,exchange_rate.csv_lags24_modellinear_cpacp,0.003595047950142613,0.04030819054582108,0.8479841374752148,0.14651699384583614,0.20821111776894197,0.008470611946103856,time_series_library/time_series_library/dataset/exchange_rate/exchange_rate.csv,acp,
