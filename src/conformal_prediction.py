@@ -38,9 +38,12 @@ class ConformalPredictionConfig:
     aci_gamma_base: float = 0.05
     aci_spectral_beta: float = 1.0
 
+    # spectral score cap (ensures bounded γ_t for coverage guarantee)
+    spectral_score_cap: float = 2.0
+
     # Wasserstein reweighting (Xu et al., 2025)
     wass_reweight: bool = True
-    wass_temperature: float = 1.0
+    wass_temperature: float = 0.1
 
     # residual-space regime discovery + warm-start
     regime_on_residuals: bool = True
@@ -50,12 +53,8 @@ class ConformalPredictionConfig:
     min_regime_eval_size: int = 20
     min_regime_cov_size: int = 20
 
-    # CEM replay buffer
-    eval_window_size: int = 150
-
-    # coverage penalty window
+    # coverage history window (for regime trust gating)
     coverage_window: int = 50
-    lambda_cov: float = 5.0
 
     # refresh k in steps
     k_update_every: int = 20
@@ -63,19 +62,13 @@ class ConformalPredictionConfig:
     k_max: float = 100.0
     k_fallback: float = 1.0
 
-    # --- CEM hyper ---
+    # alpha bounds
     alpha_min: float = 0.01
     alpha_max: float = 0.3
-    cem_pop: int = 16
-    cem_elite_frac: float = 0.25
-    cem_noise: float = 0.02
-    cem_lr: float = 0.3
-    cem_n_iters: int = 3
 
     use_spectral: bool = True
     use_regime: bool = True
     use_cem: bool = True
-    width_weight: float = 1.0
 
 
 class _SpectralDrift:
@@ -109,17 +102,21 @@ class _SpectralDrift:
 
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray,
                       q: float) -> float:
-    """Weighted quantile (Barber et al., 2023; Tibshirani et al., 2019).
+    """Weighted quantile with finite-sample correction.
+
+    Implements the weighted conformal quantile from Tibshirani et al. (2019)
+    Theorem 2.  The test point receives unit weight w_{n+1}=1, so the
+    effective quantile level is adjusted to  q · (1 + 1 / Σ w_i).
 
     Parameters
     ----------
-    values : 1-D array of sample values.
-    weights : 1-D array of non-negative weights (same length as values).
-    q : quantile level in [0, 1].
+    values : 1-D array of calibration nonconformity scores.
+    weights : 1-D array of non-negative importance weights.
+    q : nominal quantile level in [0, 1].
 
     Returns
     -------
-    float : the weighted q-quantile.
+    float : the corrected weighted q-quantile.
     """
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
@@ -135,10 +132,14 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray,
     values = values[idx]
     weights = weights[idx]
 
-    cum_w = np.cumsum(weights)
-    cum_w /= cum_w[-1]
+    # finite-sample correction: test point weight w_{n+1} = 1
+    sum_w = float(weights.sum())
+    q_adj = min(q * (1.0 + 1.0 / max(sum_w, 1e-12)), 1.0)
 
-    j = int(np.searchsorted(cum_w, q))
+    cum_w = np.cumsum(weights)
+    cum_w /= sum_w
+
+    j = int(np.searchsorted(cum_w, q_adj))
     j = min(j, len(values) - 1)
     return float(values[j])
 
@@ -177,6 +178,11 @@ class _ACIAlphaController:
         # warm-start bookkeeping (Method 3)
         self.prev_rid: Optional[int] = None
         self.regime_step_counts = np.zeros(self.n_regimes, dtype=int)
+
+        # Mondrian ACI: per-regime EWMA coverage for conditional guarantee
+        self._regime_cov_ema = np.full(self.n_regimes, float(cfg.target_coverage),
+                                       dtype=float)
+        self._regime_cov_n = np.zeros(self.n_regimes, dtype=int)
 
     # ------------------------------------------------------------------
     # choose / step  –  same names as the legacy CEM controller so that
@@ -234,8 +240,9 @@ class _ACIAlphaController:
         gamma_base = float(getattr(self.cfg, 'aci_gamma_base', 0.05))
         beta = float(getattr(self.cfg, 'aci_spectral_beta', 1.0))
 
-        # spectral-modulated learning rate
-        gamma = gamma_base * (1.0 + beta * max(0.0, float(spectral_score)))
+        # spectral-modulated learning rate (capped for bounded γ_t guarantee)
+        s_cap = float(getattr(self.cfg, 'spectral_score_cap', 2.0))
+        gamma = gamma_base * (1.0 + beta * min(max(0.0, float(spectral_score)), s_cap))
 
         target = float(self.cfg.target_coverage)
         # grad > 0  when covered (hit)  → α increases → interval narrows
@@ -249,8 +256,15 @@ class _ACIAlphaController:
         self.alpha_global = float(np.clip(
             self.alpha_global + gamma * grad, a_lo, a_hi))
 
-        # warm-start on regime transition (Method 3)
+        # Mondrian ACI: per-regime EWMA coverage tracking
         rid_c = int(max(0, min(self.n_regimes - 1, rid)))
+        ema_beta = 0.95
+        self._regime_cov_ema[rid_c] = (
+            ema_beta * self._regime_cov_ema[rid_c]
+            + (1.0 - ema_beta) * float(covered))
+        self._regime_cov_n[rid_c] += 1
+
+        # warm-start on regime transition (Method 3)
         if self.prev_rid is not None and rid_c != self.prev_rid:
             min_samples = int(getattr(self.cfg, 'min_regime_calib_size', 20))
             if self.regime_step_counts[rid_c] < min_samples:
@@ -258,10 +272,16 @@ class _ACIAlphaController:
         self.prev_rid = rid_c
         self.regime_step_counts[rid_c] += 1
 
-        # per-regime track updated when trusted
+        # per-regime track: use REGIME-LOCAL coverage for gradient (Mondrian)
         if update_regime:
+            n_r = int(self._regime_cov_n[rid_c])
+            if n_r >= 20:
+                cov_r = float(self._regime_cov_ema[rid_c])
+                grad_r = cov_r - target  # regime-conditional gradient
+            else:
+                grad_r = grad  # fallback to global signal
             self.alpha_per_regime[rid_c] = float(np.clip(
-                self.alpha_per_regime[rid_c] + gamma * grad, a_lo, a_hi))
+                self.alpha_per_regime[rid_c] + gamma * grad_r, a_lo, a_hi))
             return float(self.alpha_per_regime[rid_c])
 
         return float(self.alpha_global)
@@ -285,6 +305,12 @@ class _AdaptiveRegimeKernel:
         self._new_candidate_hits = 0
 
         self._ewma_var: Optional[float] = None
+        self._ewma_var_resid: Optional[float] = None  # separate state for residual mode
+
+        # online feature standardization (Welford)
+        self._feat_n: int = 0
+        self._feat_mean = np.zeros(5, dtype=float)
+        self._feat_m2 = np.zeros(5, dtype=float)
 
     def _mad(self, x: np.ndarray) -> float:
         x = x[np.isfinite(x)]
@@ -294,16 +320,19 @@ class _AdaptiveRegimeKernel:
         mad = np.median(np.abs(x - med))
         return float(1.4826 * mad + 1e-6)
 
-    def _ewma_vol(self, x: np.ndarray) -> float:
+    def _ewma_vol(self, x: np.ndarray, residual: bool = False) -> float:
         beta = float(self.cfg.ewma_beta)
         x = x[np.isfinite(x)]
+        attr = '_ewma_var_resid' if residual else '_ewma_var'
+        var = getattr(self, attr)
         if len(x) == 0:
-            return float(np.sqrt(self._ewma_var)) if self._ewma_var else 0.0
-        if self._ewma_var is None:
-            self._ewma_var = float(np.mean(x**2) + 1e-6)
+            return float(np.sqrt(var)) if var else 0.0
+        if var is None:
+            var = float(np.mean(x**2) + 1e-6)
         for v in x[-min(10, len(x)):]:
-            self._ewma_var = beta * self._ewma_var + (1.0 - beta) * float(v**2)
-        return float(np.sqrt(self._ewma_var + 1e-12))
+            var = beta * var + (1.0 - beta) * float(v**2)
+        setattr(self, attr, var)
+        return float(np.sqrt(var + 1e-12))
 
     def _jump_rate(self, x: np.ndarray) -> float:
         x = x[np.isfinite(x)]
@@ -349,7 +378,7 @@ class _AdaptiveRegimeKernel:
         vol_rob = 1.4826 * mad + 1e-6
 
         # 2) EWMA vol (on returns)
-        vol_ewma = self._ewma_vol(r)
+        vol_ewma = self._ewma_vol(r, residual=False)
 
         # 3) jump rate (on returns)
         jump = self._jump_rate(r)
@@ -371,7 +400,6 @@ class _AdaptiveRegimeKernel:
             ac1,
             slope,
         ], dtype=float)
-        
 
     def _residual_features(self, resid_window: np.ndarray) -> np.ndarray:
         """
@@ -384,7 +412,7 @@ class _AdaptiveRegimeKernel:
             return np.zeros(5, dtype=float)
 
         vol_rob = self._mad(r)
-        vol_ewma = self._ewma_vol(r)
+        vol_ewma = self._ewma_vol(r, residual=True)
         jump = self._jump_rate(r)
         ac1 = self._acf1(r)
 
@@ -418,9 +446,22 @@ class _AdaptiveRegimeKernel:
         dmin = float(np.sqrt(max(d2[j], 0.0)))
         return j, dmin
 
+    def _standardize(self, f: np.ndarray) -> np.ndarray:
+        """Online Welford standardization of feature vector."""
+        self._feat_n += 1
+        delta = f - self._feat_mean
+        self._feat_mean += delta / self._feat_n
+        delta2 = f - self._feat_mean
+        self._feat_m2 += delta * delta2
+        if self._feat_n < 3:
+            return f  # not enough data to standardize
+        std = np.sqrt(self._feat_m2 / (self._feat_n - 1) + 1e-8)
+        return (f - self._feat_mean) / std
+
     def _update_and_get_regime(self, window: np.ndarray,
                                residual: bool = False) -> int:
-        f = self._residual_features(window) if residual else self._features(window)
+        f_raw = self._residual_features(window) if residual else self._features(window)
+        f = self._standardize(f_raw)
         j, dmin = self._assign(f)
 
         # sticky preference
@@ -499,11 +540,6 @@ class AdaptiveConformalPredictor:
         self.calib_e_hi_by_regime: Dict[int, Deque[float]] = {r: deque(maxlen=Wc) for r in range(R)}
         self.calib_s_by_regime: Dict[int, Deque[float]] = {r: deque(maxlen=Wc) for r in range(R)}
 
-        self.eval_buffer_global: Deque[Tuple[float, float]] = deque(maxlen=int(self.config.eval_window_size))
-        self.eval_buffer_by_regime: Dict[int, Deque[Tuple[float, float]]] = {
-            r: deque(maxlen=int(self.config.eval_window_size)) for r in range(R)
-        }
-
         self.cover_hist_global: Deque[float] = deque(maxlen=int(self.config.coverage_window))
         self.cover_hist_by_regime: Dict[int, Deque[float]] = {r: deque(maxlen=int(self.config.coverage_window)) for r in range(R)}
 
@@ -544,7 +580,6 @@ class AdaptiveConformalPredictor:
             self.calib_e_lo_global,
             self.calib_e_hi_global,
             self.calib_s_global,
-            self.eval_buffer_global,
             self.cover_hist_global,
             self._k_scale_global,
             )
@@ -556,7 +591,6 @@ class AdaptiveConformalPredictor:
             self.calib_e_lo_by_regime[rid],
             self.calib_e_hi_by_regime[rid],
             self.calib_s_by_regime[rid],
-            self.eval_buffer_by_regime[rid],
             self.cover_hist_by_regime[rid],
             self._k_scale_by_regime[rid],
         )
@@ -610,10 +644,10 @@ class AdaptiveConformalPredictor:
     ) -> Tuple[float, float, float]:
         a = float(np.clip(alpha, float(self.config.alpha_min), float(self.config.alpha_max)))
 
-        # warm start
+        # warm start (scores are uncertainty-normalized, so use unit scale)
         if len(e_lo_buf) < int(self.config.min_calib_size) or len(e_hi_buf) < int(self.config.min_calib_size):
             scale = 1.0 / max(1e-6, 1.0 - a)
-            m = float(model_uncertainty) * scale
+            m = scale  # unit in normalized space; predict() multiplies by unc
             return float(m), float(m), 0.0
 
         e_lo_raw = np.asarray(list(e_lo_buf), float)
@@ -660,20 +694,25 @@ class AdaptiveConformalPredictor:
             if len(s) > 0:
                 q_s = float(np.quantile(s, 1.0 - a))
 
-        extra = float(self.config.lambda_spectral) * float(k_scale) * float(q_s)
-        if not self.config.use_spectral:
+        # additive spectral margin — disabled when Wasserstein reweighting is
+        # active (the weighted quantile already accounts for drift; stacking
+        # both would double-count and inflate width unnecessarily).
+        use_wass_active = (use_wass and self.config.use_spectral and n_s >= n_raw)
+        if use_wass_active or (not self.config.use_spectral):
             extra = 0.0
+        else:
+            extra = float(self.config.lambda_spectral) * float(k_scale) * float(q_s)
 
         m_lo = max(0.0, q_lo + extra)
         m_hi = max(0.0, q_hi + extra)
         return float(m_lo), float(m_hi), float(q_s)
 
     def _margins_global(self, alpha: float, model_uncertainty: float) -> Tuple[float, float, float]:
-        e_lo, e_hi, s, _, _, k = self._buffers_global()
+        e_lo, e_hi, s, _, k = self._buffers_global()
         return self._margins_from_buffers(e_lo, e_hi, s, k, alpha, model_uncertainty)
 
     def _margins_regime(self, rid: int, alpha: float, model_uncertainty: float) -> Tuple[float, float, float]:
-        e_lo, e_hi, s, _, _, k = self._buffers_regime(rid)
+        e_lo, e_hi, s, _, k = self._buffers_regime(rid)
         return self._margins_from_buffers(e_lo, e_hi, s, k, alpha, model_uncertainty)
 
     def _extract_price_window(self, x) -> Optional[np.ndarray]:
@@ -757,8 +796,9 @@ class AdaptiveConformalPredictor:
             m_lo, m_hi, q_s = self._margins_global(alpha=alpha, model_uncertainty=unc)
             k_used = float(self._k_scale_global)
 
-        lower = float(yp - m_lo)
-        upper = float(yp + m_hi)
+        # de-normalize: margins are in normalized space, scale back by unc
+        lower = float(yp - m_lo * unc)
+        upper = float(yp + m_hi * unc)
 
         self._pending = {
             "rid": rid,
@@ -802,17 +842,19 @@ class AdaptiveConformalPredictor:
         upper = float(p["upper"])
         q_s = float(p["q_s"])
 
-        e_lo = max(0.0, yp - yt)
-        e_hi = max(0.0, yt - yp)
-        err = float(e_lo + e_hi)
+        e_lo_raw = max(0.0, yp - yt)
+        e_hi_raw = max(0.0, yt - yp)
+        err = float(e_lo_raw + e_hi_raw)
+
+        # normalize conformal scores by uncertainty (Lei et al., 2018)
+        unc = max(float(p["unc"]), 1e-8)
+        e_lo = float(e_lo_raw) / unc
+        e_hi = float(e_hi_raw) / unc
 
         self.calib_e_lo_global.append(float(e_lo))
         self.calib_e_hi_global.append(float(e_hi))
         self.calib_e_lo_by_regime[rid].append(float(e_lo))
         self.calib_e_hi_by_regime[rid].append(float(e_hi))
-
-        self.eval_buffer_global.append((float(yp), float(yt)))
-        self.eval_buffer_by_regime[rid].append((float(yp), float(yt)))
 
         covered = 1.0 if (lower <= yt <= upper) else 0.0
         self.cover_hist_global.append(float(covered))
@@ -823,7 +865,8 @@ class AdaptiveConformalPredictor:
             s = 0.0
             if len(self.prediction_errors) >= int(self.config.window_size):
                 window = np.asarray(list(self.prediction_errors)[-int(self.config.window_size):], float)
-                s = float(self._drift.score(window[:-1], window[1:]))
+                half = len(window) // 2
+                s = float(self._drift.score(window[:half], window[half:]))
             self.calib_s_global.append(s)
             self.calib_s_by_regime[rid].append(float(s))
 

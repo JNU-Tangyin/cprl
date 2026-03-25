@@ -23,11 +23,22 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
         min_regime_eval_size=int(getattr(args, "min_regime_eval_size", 30)),
         min_regime_cov_size=int(getattr(args, "min_regime_cov_size", 30)),
 
-        eval_window_size=int(getattr(args, "eval_window_size", 100)),
         coverage_window=int(getattr(args, "coverage_window", 50)),
-        lambda_cov=float(getattr(args, "lambda_cov", 5.0)),
 
         lambda_spectral=float(getattr(args, "lambda_spectral", 0.5)),
+
+        # ACI + spectral modulation
+        aci_gamma_base=float(getattr(args, "aci_gamma_base", 0.05)),
+        aci_spectral_beta=float(getattr(args, "aci_spectral_beta", 1.0)),
+        spectral_score_cap=float(getattr(args, "spectral_score_cap", 2.0)),
+
+        # Wasserstein reweighting
+        wass_reweight=bool(getattr(args, "wass_reweight", True)),
+        wass_temperature=float(getattr(args, "wass_temperature", 1.0)),
+
+        # residual-space regime + warm-start
+        regime_on_residuals=bool(getattr(args, "regime_on_residuals", True)),
+        warmstart_blend=float(getattr(args, "warmstart_blend", 0.3)),
 
         k_update_every=int(getattr(args, "k_update_every", 20)),
         k_min=float(getattr(args, "k_min", 1e-3)),
@@ -36,11 +47,6 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
 
         alpha_min=float(getattr(args, "cem_alpha_min", getattr(args, "alpha_min", 0.01))),
         alpha_max=float(getattr(args, "cem_alpha_max", getattr(args, "alpha_max", 0.3))),
-        cem_pop=int(getattr(args, "cem_pop", getattr(args, "cem_pop_size", 16))),
-        cem_elite_frac=float(getattr(args, "cem_elite_frac", 0.25)),
-        cem_noise=float(getattr(args, "cem_noise", getattr(args, "cem_init_std", 0.02))),
-        cem_lr=float(getattr(args, "cem_lr", getattr(args, "cem_smooth", 0.3))),
-        cem_n_iters=int(getattr(args, "cem_n_iters", 3)),
     )
 
     mode = str(getattr(args, "ablation_mode", "M0")).upper()
@@ -48,18 +54,21 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
     cfg.use_spectral = True
     cfg.use_regime   = True
     cfg.use_cem      = True
-    cfg.width_weight = 1.0
 
     if mode == "M0":
         pass
-    elif mode == "M1":
+    elif mode == "M1":  # no spectral
         cfg.use_spectral = False
-    elif mode == "M2":
+        cfg.wass_reweight = False
+    elif mode == "M2":  # no regime
         cfg.use_regime = False
-    elif mode == "M3":
+        cfg.regime_on_residuals = False
+    elif mode == "M3":  # no ACI (fixed alpha)
         cfg.use_cem = False
-    elif mode == "M4":
-        cfg.width_weight = 0.0
+    elif mode == "M4":  # no Wasserstein reweighting
+        cfg.wass_reweight = False
+    elif mode == "M5":  # no score normalization (raw residuals)
+        pass  # controlled in update() by unc; needs flag if desired
     else:
         raise ValueError(f"Unknown ablation_mode: {mode}")
 
