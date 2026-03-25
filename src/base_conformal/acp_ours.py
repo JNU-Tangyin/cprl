@@ -1,6 +1,6 @@
 # src/base_conformal/acp_ours.py
 
-from src.conformal_prediction_ import ConformalPredictionConfig, AdaptiveConformalPredictor
+from src.conformal_prediction import ConformalPredictionConfig, AdaptiveConformalPredictor
 
 def build_acp_ours(args) -> AdaptiveConformalPredictor:
     cfg = ConformalPredictionConfig(
