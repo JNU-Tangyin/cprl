@@ -1,0 +1,3 @@
+setting,cp_mode,target_coverage,worst_window_coverage,width_step_mean,width_std,control_alpha_step_mean,control_alpha_std,comment
+conformal_acp_lags96_modellinear_cpacp_a0.1_cw200_seed0_modeonline_debug-0_M0,acp,0.9,0.86,0.008820560745548706,0.0637644567570946,0.008620183404241668,0.06471724126659206,
+conformal_acp_lags96_modellinear_cpacp_a0.1_cw200_seed0_modeonline_debug-0_M0,acp,0.9,0.87,0.009098089435262833,0.06433363017258124,0.008657852925218628,0.06338515603398484,
