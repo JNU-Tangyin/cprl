@@ -154,6 +154,7 @@ def get_args():
 
     # ACP / SACP config
     parser.add_argument("--ablation_mode", type=str, default="M0")
+    parser.add_argument("--setting_suffix", type=str, default="")
     parser.add_argument("--spectral_window", type=int, default=64)
     parser.add_argument("--window_size", type=int, default=64)
     parser.add_argument("--max_regimes", type=int, default=8)
@@ -177,6 +178,7 @@ def get_args():
     parser.add_argument("--wass_reweight", type=int, default=1)
     parser.add_argument("--wass_temperature", type=float, default=0.1)
     parser.add_argument("--use_cqr_score", type=int, default=1)
+    parser.add_argument("--fallback_to_price_regime", type=int, default=0)
     parser.add_argument("--cqr_refit_every", type=int, default=50)
     parser.add_argument("--cqr_l2", type=float, default=0.1)
     parser.add_argument("--cqr_split_ratio", type=float, default=0.6)
@@ -205,6 +207,13 @@ def get_args():
     parser.add_argument("--ode_refit_every", type=int, default=25)
     parser.add_argument("--ode_bootstrap_size", type=int, default=60)
     parser.add_argument("--ode_assignment_threshold", type=float, default=2.0)
+    parser.add_argument("--ode_order_switch_margin", type=float, default=2.0)
+    parser.add_argument("--ode_order_switch_patience", type=int, default=3)
+    parser.add_argument("--ode_use_feature_filter", type=int, default=0)
+    parser.add_argument("--ode_filter_process_var", type=float, default=0.05)
+    parser.add_argument("--ode_filter_measure_var", type=float, default=0.5)
+    parser.add_argument("--ode_filter_init_var", type=float, default=1.0)
+    parser.add_argument("--ode_filter_reset_on_order_change", type=int, default=1)
     parser.add_argument("--k_update_every", type=int, default=20)
     parser.add_argument("--k_min", type=float, default=1e-3)
     parser.add_argument("--k_max", type=float, default=100.0)
@@ -220,7 +229,7 @@ def get_args():
     parser.add_argument("--cp_lr", type=float, default=0.01)
     parser.add_argument("--aci_warm_start", type=int, default=30)
     parser.add_argument("--aci_fallback_width", type=float, default=3.0)
-    parser.add_argument("--aci_clip_alpha", type=int, default=0)
+    parser.add_argument("--aci_clip_alpha", type=int, default=1)
     parser.add_argument("--aci_eps", type=float, default=1e-6)
     parser.add_argument("--nex_gamma", type=float, default=0.99)
     parser.add_argument("--agaci_warmup_steps", type=int, default=50)
@@ -241,6 +250,8 @@ def get_args():
     args.regime_on_residuals = bool(args.regime_on_residuals)
     args.ode_use_residuals = bool(args.ode_use_residuals)
     args.ode_stable_only = bool(args.ode_stable_only)
+    args.ode_use_feature_filter = bool(args.ode_use_feature_filter)
+    args.ode_filter_reset_on_order_change = bool(args.ode_filter_reset_on_order_change)
     args.adaptive_alpha = bool(args.adaptive_alpha)
     args.ablation_explicit = ("--ablation_mode" in sys.argv)
 
@@ -406,6 +417,75 @@ def _write_dynamics_csv(path: str, rows: List[Dict]):
         w.writerow(header)
         for r in rows:
             w.writerow([r.get(k, None) for k in header])
+
+
+def _compute_regime_metrics_rows(
+    regime_ids: List[int],
+    y_true: np.ndarray,
+    intervals: List[Tuple[float, float]],
+    *,
+    setting: str,
+    cp_mode: str,
+    target_coverage: float,
+    alpha_nominal: float,
+    w_ref: float,
+) -> List[Dict]:
+    if len(regime_ids) == 0 or len(intervals) != len(y_true):
+        return []
+
+    if len(regime_ids) > len(y_true):
+        regime_ids = regime_ids[-len(y_true):]
+
+    if len(regime_ids) != len(y_true):
+        return []
+
+    regime_arr = np.asarray(regime_ids, dtype=int)
+    y_arr = np.asarray(y_true, dtype=float)
+    widths = np.asarray([float(hi - lo) for lo, hi in intervals], dtype=float)
+
+    rows: List[Dict] = []
+    for rid in sorted(np.unique(regime_arr).tolist()):
+        idx = np.where(regime_arr == int(rid))[0]
+        if idx.size == 0:
+            continue
+
+        y_r = y_arr[idx]
+        intervals_r = [intervals[int(i)] for i in idx.tolist()]
+        avg_width_r = float(np.mean(widths[idx])) if idx.size > 0 else float("nan")
+        cov_r = float(compute_coverage(y_r, intervals_r))
+        ces_r = float(compute_ces(
+            coverage=cov_r,
+            target_coverage=float(target_coverage),
+            avg_width=avg_width_r,
+            w_ref=float(w_ref),
+            alpha=float(alpha_nominal),
+        ))
+
+        rows.append({
+            "setting": setting,
+            "cp_mode": cp_mode,
+            "regime_id": int(rid),
+            "count": int(idx.size),
+            "target_coverage": float(target_coverage),
+            "coverage": cov_r,
+            "avg_width": avg_width_r,
+            "ces": ces_r,
+        })
+
+    return rows
+
+
+def _save_regime_metrics(
+    *,
+    results_dir: str,
+    setting: str,
+    rows: List[Dict],
+) -> Optional[str]:
+    if len(rows) == 0:
+        return None
+    out_path = os.path.join(results_dir, "regime_metrics", f"{setting}.csv")
+    _write_dynamics_csv(out_path, rows)
+    return out_path
 
 # ============================================================
 # Base forecasting models (point prediction)
@@ -951,6 +1031,26 @@ class ExpConformal(ExpBasic):
         _write_dynamics_csv(dyn_path, self.test_dynamics)
         print(f"[Dynamics] saved: {dyn_path}")
 
+        regime_metrics_path = None
+        if hasattr(cp_used, "state_history"):
+            regime_rows = _compute_regime_metrics_rows(
+                list(getattr(cp_used, "state_history", [])),
+                y_true_arr,
+                intervals,
+                setting=setting,
+                cp_mode=str(getattr(self.args, "cp_mode", "cp")),
+                target_coverage=float(target_coverage),
+                alpha_nominal=float(alpha_nominal),
+                w_ref=float(w_ref_final),
+            )
+            regime_metrics_path = _save_regime_metrics(
+                results_dir=getattr(self.args, "results_dir", "results"),
+                setting=setting,
+                rows=regime_rows,
+            )
+            if regime_metrics_path:
+                print(f"[RegimeMetrics] saved: {regime_metrics_path}")
+
         # ---------- plots ----------
         base_model_name = getattr(self.args, "base_model", "linear")
         dataset_name = os.path.basename(self.args.data_path).replace(".csv", "")
@@ -1155,6 +1255,26 @@ class ExpConformal(ExpBasic):
             f"RCS={final_rcs:.4f}"
         )
 
+        regime_metrics_path = None
+        if hasattr(cp_used, "state_history"):
+            regime_rows = _compute_regime_metrics_rows(
+                list(getattr(cp_used, "state_history", [])),
+                y_true_arr,
+                intervals,
+                setting=setting,
+                cp_mode=str(getattr(self.args, "cp_mode", "cp")),
+                target_coverage=float(target_coverage),
+                alpha_nominal=float(alpha_nominal),
+                w_ref=float(w_ref_final),
+            )
+            regime_metrics_path = _save_regime_metrics(
+                results_dir=getattr(self.args, "results_dir", "results"),
+                setting=setting,
+                rows=regime_rows,
+            )
+            if regime_metrics_path:
+                print(f"[RegimeMetrics] saved: {regime_metrics_path}")
+
         base_model_name = getattr(self.args, "base_model", "cache")
         cp_mode = getattr(self.args, "cp_mode", "cp")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1261,6 +1381,9 @@ class ExpConformal(ExpBasic):
             setting = f"{dataset_name}_lags{lags}_model{base_model}_cp{cp_mode}_mode{run_mode}_seed{seed}"
             if is_ablation_run:
                 setting = f"{setting}_ABL{ablation_mode}"
+            setting_suffix = str(getattr(self.args, "setting_suffix", "") or "").strip()
+            if setting_suffix:
+                setting = f"{setting}_{setting_suffix}"
 
         w_ref_calib = None
         if hasattr(self, "calib_y_true_arr") and self.calib_y_true_arr is not None and len(self.calib_y_true_arr) > 0:
@@ -1288,7 +1411,16 @@ class ExpConformal(ExpBasic):
                 w_ref=w_ref_calib,
             )
 
-        coverage_gap = float(abs(float(coverage) - float(target_coverage)))
+        coverage_bias = float(coverage) - float(target_coverage)
+        abs_coverage_gap = float(abs(coverage_bias))
+        under_coverage_gap = float(max(float(target_coverage) - float(coverage), 0.0))
+        over_coverage_gap = float(max(float(coverage) - float(target_coverage), 0.0))
+        if coverage_bias > 0:
+            coverage_bias_direction = "overcoverage"
+        elif coverage_bias < 0:
+            coverage_bias_direction = "undercoverage"
+        else:
+            coverage_bias_direction = "balanced"
 
         logger.log_conformal(
             setting=setting,
@@ -1296,7 +1428,11 @@ class ExpConformal(ExpBasic):
             target_coverage=float(target_coverage),
             metrics={
                 "coverage": float(coverage),
-                "coverage_gap": float(coverage_gap),
+                "abs_coverage_gap": float(abs_coverage_gap),
+                "under_coverage_gap": float(under_coverage_gap),
+                "over_coverage_gap": float(over_coverage_gap),
+                "coverage_bias": float(coverage_bias),
+                "coverage_bias_direction": coverage_bias_direction,
                 "avg_width": float(avg_width),
                 "ces": float(ces),
                 "rcs": float(rcs),

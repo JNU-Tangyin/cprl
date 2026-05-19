@@ -12,7 +12,7 @@ def apply_ablation_overrides(a):
     # defaults = full model
     a.use_spectral = True
     a.use_regime = True
-    a.use_cem = True
+    a.use_adaptive_alpha = True
     a.width_weight = 1.0
 
     if mode == "M1":        # w/o spectral
@@ -20,7 +20,7 @@ def apply_ablation_overrides(a):
     elif mode == "M2":      # w/o regime
         a.use_regime = False
     elif mode == "M3":      # w/o adaptive alpha
-        a.use_cem = False
+        a.use_adaptive_alpha = False
     elif mode == "M4":      # w/o width penalty
         a.width_weight = 0.0
 
