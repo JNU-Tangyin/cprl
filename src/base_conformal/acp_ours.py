@@ -52,6 +52,7 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
 
         # residual-space regime + warm-start
         regime_on_residuals=bool(getattr(args, "regime_on_residuals", True)),
+        fallback_to_price_regime=bool(getattr(args, "fallback_to_price_regime", False)),
         warmstart_blend=float(getattr(args, "warmstart_blend", 0.3)),
         regime_method=str(getattr(args, "regime_method", "feature")).lower(),
 
@@ -70,6 +71,13 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
         ode_refit_every=int(getattr(args, "ode_refit_every", 25)),
         ode_bootstrap_size=int(getattr(args, "ode_bootstrap_size", 60)),
         ode_assignment_threshold=float(getattr(args, "ode_assignment_threshold", 2.0)),
+        ode_order_switch_margin=float(getattr(args, "ode_order_switch_margin", 0.0)),
+        ode_order_switch_patience=int(getattr(args, "ode_order_switch_patience", 1)),
+        ode_use_feature_filter=bool(getattr(args, "ode_use_feature_filter", False)),
+        ode_filter_process_var=float(getattr(args, "ode_filter_process_var", 0.05)),
+        ode_filter_measure_var=float(getattr(args, "ode_filter_measure_var", 0.5)),
+        ode_filter_init_var=float(getattr(args, "ode_filter_init_var", 1.0)),
+        ode_filter_reset_on_order_change=bool(getattr(args, "ode_filter_reset_on_order_change", True)),
 
         k_update_every=int(getattr(args, "k_update_every", 20)),
         k_min=float(getattr(args, "k_min", 1e-3)),

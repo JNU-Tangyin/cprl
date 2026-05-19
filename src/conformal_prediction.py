@@ -73,6 +73,7 @@ class ConformalPredictionConfig:
 
     # residual-space regime discovery + warm-start
     regime_on_residuals: bool = True
+    fallback_to_price_regime: bool = False
     warmstart_blend: float = 0.3
     regime_method: str = "feature"
 
@@ -91,6 +92,13 @@ class ConformalPredictionConfig:
     ode_refit_every: int = 25
     ode_bootstrap_size: int = 60
     ode_assignment_threshold: float = 2.0
+    ode_order_switch_margin: float = 2.0
+    ode_order_switch_patience: int = 3
+    ode_use_feature_filter: bool = False
+    ode_filter_process_var: float = 0.05
+    ode_filter_measure_var: float = 0.5
+    ode_filter_init_var: float = 1.0
+    ode_filter_reset_on_order_change: bool = True
 
     # per-regime fallback thresholds
     min_regime_eval_size: int = 20
@@ -575,13 +583,25 @@ class _ODERegimeKernel:
         self.cond_max = float(getattr(cfg, "ode_cond_max", 1e8))
         self.stable_only = bool(getattr(cfg, "ode_stable_only", True))
         self.min_samples = max(8, int(getattr(cfg, "ode_min_samples", 12)))
+        self.order_switch_margin = float(getattr(cfg, "ode_order_switch_margin", 0.0))
+        self.order_switch_patience = max(1, int(getattr(cfg, "ode_order_switch_patience", 1)))
+        self.use_feature_filter = bool(getattr(cfg, "ode_use_feature_filter", False))
+        self.filter_process_var = max(1e-8, float(getattr(cfg, "ode_filter_process_var", 0.05)))
+        self.filter_measure_var = max(1e-8, float(getattr(cfg, "ode_filter_measure_var", 0.5)))
+        self.filter_init_var = max(1e-8, float(getattr(cfg, "ode_filter_init_var", 1.0)))
+        self.filter_reset_on_order_change = bool(getattr(cfg, "ode_filter_reset_on_order_change", True))
 
         self.window_history: List[_ODEFitResult] = []
         self.cluster_centers: Dict[int, List[np.ndarray]] = {0: [], 1: [], 2: []}
         self.cluster_rids: Dict[int, List[int]] = {0: [], 1: [], 2: []}
         self.next_rid: int = 0
         self.prev_rid: Optional[int] = None
+        self.prev_order: Optional[int] = None
+        self.pending_order: Optional[int] = None
+        self.pending_order_hits: int = 0
         self._steps_seen: int = 0
+        self._filter_mean: Dict[int, Optional[np.ndarray]] = {0: None, 1: None, 2: None}
+        self._filter_cov: Dict[int, Optional[np.ndarray]] = {0: None, 1: None, 2: None}
 
     def reset(self) -> None:
         self.window_history.clear()
@@ -589,7 +609,12 @@ class _ODERegimeKernel:
         self.cluster_rids = {0: [], 1: [], 2: []}
         self.next_rid = 0
         self.prev_rid = None
+        self.prev_order = None
+        self.pending_order = None
+        self.pending_order_hits = 0
         self._steps_seen = 0
+        self._filter_mean = {0: None, 1: None, 2: None}
+        self._filter_cov = {0: None, 1: None, 2: None}
 
     def _smooth(self, x: np.ndarray) -> np.ndarray:
         w = max(1, int(getattr(self.cfg, "ode_smooth_window", 1)))
@@ -710,7 +735,47 @@ class _ODERegimeKernel:
             valid.append(fit)
         if len(valid) == 0:
             return candidates[0] if len(candidates) > 0 else None
-        return min(valid, key=lambda fit: (fit.bic, fit.order))
+        by_order: Dict[int, _ODEFitResult] = {}
+        for fit in valid:
+            cur = by_order.get(int(fit.order))
+            if cur is None or (fit.bic, fit.order) < (cur.bic, cur.order):
+                by_order[int(fit.order)] = fit
+
+        best_fit = min(valid, key=lambda fit: (fit.bic, fit.order))
+        if self.prev_order is None:
+            self.pending_order = None
+            self.pending_order_hits = 0
+            return best_fit
+
+        current_fit = by_order.get(int(self.prev_order))
+        if current_fit is None:
+            self.pending_order = None
+            self.pending_order_hits = 0
+            return best_fit
+
+        if int(best_fit.order) == int(self.prev_order):
+            self.pending_order = None
+            self.pending_order_hits = 0
+            return current_fit
+
+        improvement = float(current_fit.bic - best_fit.bic)
+        if improvement <= self.order_switch_margin:
+            self.pending_order = None
+            self.pending_order_hits = 0
+            return current_fit
+
+        if self.pending_order is not None and int(self.pending_order) == int(best_fit.order):
+            self.pending_order_hits += 1
+        else:
+            self.pending_order = int(best_fit.order)
+            self.pending_order_hits = 1
+
+        if self.pending_order_hits >= self.order_switch_patience:
+            self.pending_order = None
+            self.pending_order_hits = 0
+            return best_fit
+
+        return current_fit
 
     def _cluster_eps(self, order: int) -> float:
         if order == 0:
@@ -760,14 +825,45 @@ class _ODERegimeKernel:
                 self.cluster_rids[order].append(self.next_rid)
                 self.next_rid += 1
 
-    def _assign_cluster(self, fit: _ODEFitResult) -> Optional[int]:
+    def _filter_feature(self, order: int, feature: np.ndarray) -> np.ndarray:
+        f = np.asarray(feature, dtype=float).reshape(-1)
+        if not self.use_feature_filter:
+            return f
+
+        order = int(order)
+        if self.filter_reset_on_order_change and self.prev_order is not None and order != self.prev_order:
+            self._filter_mean[order] = None
+            self._filter_cov[order] = None
+
+        mean_prev = self._filter_mean.get(order)
+        cov_prev = self._filter_cov.get(order)
+        dim = int(f.shape[0])
+        q = self.filter_process_var
+        r = self.filter_measure_var
+
+        if mean_prev is None or cov_prev is None or mean_prev.shape[0] != dim:
+            mean = f.copy()
+            cov = np.eye(dim, dtype=float) * self.filter_init_var
+        else:
+            mean_pred = mean_prev
+            cov_pred = cov_prev + np.eye(dim, dtype=float) * q
+            S = cov_pred + np.eye(dim, dtype=float) * r
+            K = cov_pred @ np.linalg.pinv(S)
+            mean = mean_pred + K @ (f - mean_pred)
+            cov = (np.eye(dim, dtype=float) - K) @ cov_pred
+
+        self._filter_mean[order] = mean
+        self._filter_cov[order] = cov
+        return mean
+
+    def _assign_cluster(self, fit: _ODEFitResult, feature_now: Optional[np.ndarray] = None) -> Optional[int]:
         order = int(fit.order)
         centers = self.cluster_centers.get(order, [])
         rids = self.cluster_rids.get(order, [])
         if len(centers) == 0 or len(rids) == 0:
             return None
         rows = [f.feature for f in self.window_history if f.order == order]
-        rows.append(fit.feature)
+        rows.append(np.asarray(feature_now if feature_now is not None else fit.feature, dtype=float))
         Xn, _, _ = self._normalize_features(rows)
         f_now = Xn[-1]
         dists = np.array([np.linalg.norm(f_now - c) for c in centers], dtype=float)
@@ -801,12 +897,14 @@ class _ODERegimeKernel:
         if need_rebuild:
             self._rebuild_clusters()
 
-        rid = self._assign_cluster(fit)
+        feature_now = self._filter_feature(int(fit.order), fit.feature)
+        rid = self._assign_cluster(fit, feature_now=feature_now)
         if rid is None:
             rid = self._fallback_rid()
 
         rid = int(max(0, min(self.max_regimes - 1, rid)))
         self.prev_rid = rid
+        self.prev_order = int(fit.order)
         return rid
 
 class AdaptiveConformalPredictor:
@@ -1371,12 +1469,19 @@ class AdaptiveConformalPredictor:
             use_resid = bool(getattr(self.config, 'ode_use_residuals', True))
         else:
             use_resid = bool(getattr(self.config, 'regime_on_residuals', False))
+        fallback_to_price = bool(getattr(self.config, 'fallback_to_price_regime', False))
         ode_window = max(8, int(getattr(self.config, "ode_window_size", self.config.window_size)))
         if use_resid and len(self.prediction_errors) >= 12:
             resid_win = np.asarray(list(self.prediction_errors)[-ode_window:], float)
             rid = int(self._regime._update_and_get_regime(
                 resid_win, residual=True))
-        elif x is not None:
+        elif (not use_resid) and x is not None:
+            pw = self._extract_price_window(x)
+            if pw is None or pw.size < 12:
+                rid = 0
+            else:
+                rid = int(self._regime._update_and_get_regime(pw[-ode_window:]))
+        elif use_resid and fallback_to_price and x is not None:
             pw = self._extract_price_window(x)
             if pw is None or pw.size < 12:
                 rid = 0
