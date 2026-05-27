@@ -23,43 +23,93 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
         min_regime_eval_size=int(getattr(args, "min_regime_eval_size", 30)),
         min_regime_cov_size=int(getattr(args, "min_regime_cov_size", 30)),
 
-        eval_window_size=int(getattr(args, "eval_window_size", 100)),
         coverage_window=int(getattr(args, "coverage_window", 50)),
-        lambda_cov=float(getattr(args, "lambda_cov", 5.0)),
 
         lambda_spectral=float(getattr(args, "lambda_spectral", 0.5)),
+
+        # ACI + spectral modulation
+        aci_gamma_base=float(getattr(args, "aci_gamma_base", 0.05)),
+        aci_spectral_beta=float(getattr(args, "aci_spectral_beta", 1.0)),
+        spectral_score_cap=float(getattr(args, "spectral_score_cap", 2.0)),
+
+        # Wasserstein reweighting
+        wass_reweight=bool(getattr(args, "wass_reweight", True)),
+        wass_temperature=float(getattr(args, "wass_temperature", 0.1)),
+
+        # CQR-inspired single-score conformal with online QR
+        use_cqr_score=bool(getattr(args, "use_cqr_score", True)),
+        cqr_refit_every=int(getattr(args, "cqr_refit_every", 50)),
+        cqr_l2=float(getattr(args, "cqr_l2", 0.1)),
+        cqr_split_ratio=float(getattr(args, "cqr_split_ratio", 0.6)),
+        use_legacy_buffer_cqr=bool(getattr(args, "use_legacy_buffer_cqr", False)),
+        cqr_r_clip=float(getattr(args, "cqr_r_clip", 8.0)),
+        cqr_x_clip_quantile=float(getattr(args, "cqr_x_clip_quantile", 0.01)),
+        cqr_x_std_clip=float(getattr(args, "cqr_x_std_clip", 6.0)),
+        unc_floor_min=float(getattr(args, "unc_floor_min", 1e-3)),
+        unc_floor_window=int(getattr(args, "unc_floor_window", 128)),
+        unc_floor_quantile=float(getattr(args, "unc_floor_quantile", 0.1)),
+        unc_floor_scale=float(getattr(args, "unc_floor_scale", 0.5)),
+
+        # residual-space regime + warm-start
+        regime_on_residuals=bool(getattr(args, "regime_on_residuals", True)),
+        fallback_to_price_regime=bool(getattr(args, "fallback_to_price_regime", False)),
+        warmstart_blend=float(getattr(args, "warmstart_blend", 0.3)),
+        regime_method=str(getattr(args, "regime_method", "feature")).lower(),
+
+        # ODE-based regime discovery
+        ode_window_size=int(getattr(args, "ode_window_size", 48)),
+        ode_smooth_window=int(getattr(args, "ode_smooth_window", 3)),
+        ode_use_residuals=bool(getattr(args, "ode_use_residuals", True)),
+        ode_ic=str(getattr(args, "ode_ic", "bic")).lower(),
+        ode_cond_max=float(getattr(args, "ode_cond_max", 1e6)),
+        ode_stable_only=bool(getattr(args, "ode_stable_only", True)),
+        ode_min_samples=int(getattr(args, "ode_min_samples", 16)),
+        ode_cluster_eps_order0=float(getattr(args, "ode_cluster_eps_order0", 0.55)),
+        ode_cluster_eps_order1=float(getattr(args, "ode_cluster_eps_order1", 0.9)),
+        ode_cluster_eps_order2=float(getattr(args, "ode_cluster_eps_order2", 1.1)),
+        ode_cluster_min_samples=int(getattr(args, "ode_cluster_min_samples", 6)),
+        ode_refit_every=int(getattr(args, "ode_refit_every", 25)),
+        ode_bootstrap_size=int(getattr(args, "ode_bootstrap_size", 60)),
+        ode_assignment_threshold=float(getattr(args, "ode_assignment_threshold", 2.0)),
+        ode_order_switch_margin=float(getattr(args, "ode_order_switch_margin", 0.0)),
+        ode_order_switch_patience=int(getattr(args, "ode_order_switch_patience", 1)),
+        ode_use_feature_filter=bool(getattr(args, "ode_use_feature_filter", False)),
+        ode_filter_process_var=float(getattr(args, "ode_filter_process_var", 0.05)),
+        ode_filter_measure_var=float(getattr(args, "ode_filter_measure_var", 0.5)),
+        ode_filter_init_var=float(getattr(args, "ode_filter_init_var", 1.0)),
+        ode_filter_reset_on_order_change=bool(getattr(args, "ode_filter_reset_on_order_change", True)),
 
         k_update_every=int(getattr(args, "k_update_every", 20)),
         k_min=float(getattr(args, "k_min", 1e-3)),
         k_max=float(getattr(args, "k_max", 100.0)),
         k_fallback=float(getattr(args, "k_fallback", 1.0)),
 
-        alpha_min=float(getattr(args, "cem_alpha_min", getattr(args, "alpha_min", 0.01))),
-        alpha_max=float(getattr(args, "cem_alpha_max", getattr(args, "alpha_max", 0.3))),
-        cem_pop=int(getattr(args, "cem_pop", getattr(args, "cem_pop_size", 16))),
-        cem_elite_frac=float(getattr(args, "cem_elite_frac", 0.25)),
-        cem_noise=float(getattr(args, "cem_noise", getattr(args, "cem_init_std", 0.02))),
-        cem_lr=float(getattr(args, "cem_lr", getattr(args, "cem_smooth", 0.3))),
-        cem_n_iters=int(getattr(args, "cem_n_iters", 3)),
+        alpha_min=float(getattr(args, "alpha_min", getattr(args, "cem_alpha_min", 0.01))),
+        alpha_max=float(getattr(args, "alpha_max", getattr(args, "cem_alpha_max", 0.3))),
     )
 
     mode = str(getattr(args, "ablation_mode", "M0")).upper()
 
     cfg.use_spectral = True
     cfg.use_regime   = True
-    cfg.use_cem      = True
-    cfg.width_weight = 1.0
+    cfg.use_adaptive_alpha = bool(getattr(args, "adaptive_alpha", True))
 
     if mode == "M0":
         pass
-    elif mode == "M1":
+    elif mode == "M1":  # no spectral
         cfg.use_spectral = False
-    elif mode == "M2":
+        cfg.wass_reweight = False
+    elif mode == "M2":  # no regime
         cfg.use_regime = False
-    elif mode == "M3":
-        cfg.use_cem = False
-    elif mode == "M4":
-        cfg.width_weight = 0.0
+        cfg.regime_on_residuals = False
+    elif mode == "M3":  # no adaptive alpha control (fixed alpha)
+        cfg.use_adaptive_alpha = False
+    elif mode == "M4":  # no Wasserstein reweighting
+        cfg.wass_reweight = False
+    elif mode == "M5":  # no score normalization (raw residuals)
+        pass  # controlled in update() by unc; needs flag if desired
+    elif mode == "M6":  # no CQR score (legacy separate quantiles)
+        cfg.use_cqr_score = False
     else:
         raise ValueError(f"Unknown ablation_mode: {mode}")
 

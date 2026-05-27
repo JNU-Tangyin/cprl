@@ -33,7 +33,7 @@ def build_conformal_predictor(args):
             lr=float(getattr(args, "cp_lr", 0.01)),
             warm_start=int(getattr(args, "aci_warm_start", min_calib_size)),
             fallback_width=float(getattr(args, "aci_fallback_width", 3.0)),
-            clip_alpha=bool(int(getattr(args, "aci_clip_alpha", 0))),
+            clip_alpha=bool(int(getattr(args, "aci_clip_alpha", 1))),
             eps=float(getattr(args, "aci_eps", 1e-6)),
             seed=seed,
         )
@@ -72,7 +72,7 @@ def build_conformal_predictor(args):
             min_calib_size=min_calib_size,
             warm_start=int(getattr(args, "aci_warm_start", min_calib_size)),
             fallback_width=float(getattr(args, "aci_fallback_width", 3.0)),
-            clip_alpha=bool(int(getattr(args, "aci_clip_alpha", 0))),
+            clip_alpha=bool(int(getattr(args, "aci_clip_alpha", 1))),
             eps=float(getattr(args, "aci_eps", 1e-6)),
 
             seed=seed,

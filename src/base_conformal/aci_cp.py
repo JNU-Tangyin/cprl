@@ -33,7 +33,7 @@ class ACIConfig:
     warm_start: int = 50
     fallback_width: float = 3.0
 
-    clip_alpha: bool = False
+    clip_alpha: bool = True
     eps: float = 1e-6
 
     seed: int = 0
@@ -90,7 +90,7 @@ class ACICP:
         T0: int = 500,
         warm_start: int = 50,
         fallback_width: float = 3.0,
-        clip_alpha: bool = False,
+        clip_alpha: bool = True,
         eps: float = 1e-6,
         seed: int = 0,
         **kwargs,
