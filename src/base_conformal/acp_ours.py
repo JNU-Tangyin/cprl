@@ -10,7 +10,7 @@ def build_acp_ours(args) -> AdaptiveConformalPredictor:
 
         max_regimes=int(getattr(args, "max_regimes", 8)),
         new_regime_threshold=float(getattr(args, "new_regime_threshold", 2.2)),
-        new_regime_patience=int(getattr(args, "new_1regime_patience", 3)),
+        new_regime_patience=int(getattr(args, "new_regime_patience", 3)),
         sticky_bonus=float(getattr(args, "sticky_bonus", 0.5)),
         min_state_duration=int(getattr(args, "min_state_duration", 5)),
         ewma_beta=float(getattr(args, "ewma_beta", 0.94)),
