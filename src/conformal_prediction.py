@@ -444,6 +444,7 @@ class _AdaptiveRegimeKernel:
         slope = slope / (np.std(p) + 1e-6)
 
         return np.array([
+        # log1p stabilises volatile scale variation across heterogeneous datasets (impl detail, not in paper)
             np.log1p(vol_rob),
             np.log1p(vol_ewma),
             jump,
@@ -601,6 +602,7 @@ class AdaptiveConformalPredictor:
         self.cover_hist_global: Deque[float] = deque(maxlen=int(self.config.coverage_window))
         self.cover_hist_by_regime: Dict[int, Deque[float]] = {r: deque(maxlen=int(self.config.coverage_window)) for r in range(R)}
 
+        # Diagnostic ratio of median error to median spectral score; refreshed periodically.
         # k scales
         self._k_scale_global: float = float(self.config.k_fallback)
         self._k_scale_by_regime: Dict[int, float] = {r: float(self.config.k_fallback) for r in range(R)}
