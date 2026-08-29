@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use CPRL in your research, please cite the associated paper."
+title: "Adaptive Conformal Prediction via Frequency-Domain Wasserstein Calibration and Latent State Modeling"
+authors:
+  - name: "CPRL authors"
+version: "0.1.0"
+date-released: "2026-08-04"
+repository-code: "https://github.com/LibingChen-Lydia/cprl"
+license: "MIT"
+keywords:
+  - conformal prediction
+  - time series forecasting
+  - adaptive calibration
+  - uncertainty quantification
+preferred-citation:
+  type: article
+  title: "Adaptive Conformal Prediction via Frequency-Domain Wasserstein Calibration and Latent State Modeling"
+  authors:
+    - name: "CPRL authors"
+  year: 2026
