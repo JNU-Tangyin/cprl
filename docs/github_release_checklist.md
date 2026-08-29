@@ -17,7 +17,7 @@ The project `.gitignore` excludes generated artifacts, but files already tracked
 
 ```bash
 git rm --cached -r all_results results v_results analysis_figures experiment_logs
-git rm --cached -r dataset time_series_library/dataset
+git rm --cached -r dataset
 git rm --cached .DS_Store
 git rm --cached '*.xlsx' '*.xls' '*.npz' '*.npy' '*.pkl' '*.joblib' '*.tgz' '*.tar.gz' '*.zip'
 ```
@@ -32,7 +32,7 @@ Commit these categories:
 - lightweight configuration such as `.gitignore`, `.gitattributes`, `requirements.txt`, and `pyproject.toml`
 - public documentation under `README.md`, `docs/`, `CONTRIBUTING.md`, `CITATION.cff`, and `LICENSE`
 
-Do not commit local datasets, forecast caches, results, notebook checkpoints, local logs, archives, or machine-specific files.
+Do not commit local-only datasets, forecast caches, results, notebook checkpoints, local logs, archives, or machine-specific files. Keep the paper benchmark CSV inputs under `time_series_library/dataset/` tracked.
 
 ## 4. Run a Lightweight Validation
 
@@ -70,4 +70,4 @@ After pushing:
 - add topics such as `conformal-prediction`, `time-series`, `uncertainty-quantification`, and `forecasting`
 - enable Issues if external users should report bugs
 - create a release or tag after the paper version is frozen
-- archive exact datasets, caches, and result tables externally, then link them from `README.md`
+- archive exact forecast caches and result tables externally, then link them from `README.md`

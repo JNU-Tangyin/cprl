@@ -73,7 +73,7 @@ Notes:
 - Use `--lags` to control the window size: the series is transformed into supervised samples `(X, y)`, where `X` is a lagged window of length `lags` and `y` is the next-step target.
 - Data is split **chronologically** into train / calibration / test (no shuffling).
 
-Benchmark datasets are not included in the repository. Keep local datasets outside version control and pass their paths through `--data_path`.
+The repository includes the CSV benchmark files used by the current paper protocol under `time_series_library/dataset/`, including ETT, Weather, Exchange Rate, FRED-MD target series, and BCI volatility series. Additional local datasets should stay outside version control and can be passed through `--data_path`.
 
 ---
 
@@ -150,7 +150,7 @@ python run_exp.py \
 
 Use the same `--cache_path` when comparing different conformal methods. This ensures that differences in coverage and interval width come from the conformal procedure rather than from different point forecasts.
 
-Forecast caches are generated artifacts and are not tracked by Git. If precomputed caches are needed for exact reproduction, host them externally and place them under `forecast_cache_seed*/` after download.
+Forecast caches are generated artifacts and are not tracked by Git. If precomputed caches are needed for exact reproduction, host them externally and place them under `forecast_cache_seed*/` after download. The committed benchmark CSVs are inputs; generated `.npz` forecast caches and result tables are intentionally excluded.
 
 ### 4.3 Forecast Cache Format
 
@@ -257,7 +257,7 @@ Recommended workflow:
 3. Run each conformal method with the same `--cache_path`.
 4. Compare coverage, width, and stability metrics from the generated result files.
 
-Generated results, cached forecasts, logs, and exploratory figures are intentionally excluded from version control. Commit only source code, scripts, lightweight configuration, and documentation.
+Generated results, cached forecasts, logs, and exploratory figures are intentionally excluded from version control. Commit only source code, scripts, benchmark CSV inputs, lightweight configuration, and documentation.
 
 ---
 

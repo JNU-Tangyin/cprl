@@ -76,4 +76,4 @@ For each table or figure, record:
 - `alpha`, `run_mode`, `lags`, `x_lag`, calibration window, and coverage window
 - coverage, absolute coverage gap, average width, CES, RCS, and runtime
 
-Generated caches, datasets, logs, and figures should be hosted outside GitHub if they are needed for exact reproduction.
+Generated caches, logs, and figures should be hosted outside GitHub if they are needed for exact reproduction. The benchmark CSV inputs committed under `time_series_library/dataset/` are sufficient to regenerate forecast caches.

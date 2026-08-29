@@ -1,6 +1,6 @@
 # Benchmark Data
 
-This repository does not track raw benchmark datasets, preprocessed benchmark CSVs, or forecast caches. Download the datasets from their public sources and place them under the paths below before training the base forecasters.
+This repository tracks the benchmark CSV inputs used by the current paper protocol under `time_series_library/dataset/`. Raw source files and generated forecast caches are not tracked. The source notes below document where each benchmark comes from and how to regenerate the committed CSV files if needed.
 
 ## Standard Forecasting Benchmarks
 
@@ -27,7 +27,7 @@ Expected source location before preprocessing:
 ../Datasets/fred_md/fred_md_dataset.ts
 ```
 
-Expected project-local files after preprocessing:
+Committed project-local files after preprocessing:
 
 ```text
 time_series_library/dataset/new_benchmarks/fred_md/fred_md_t1.csv
@@ -67,7 +67,7 @@ Expected source files before preprocessing:
 ../Datasets/BCI/Variation of Local Fractional Coverage/Nvidia-fc.csv
 ```
 
-Expected project-local files after preprocessing:
+Committed project-local files after preprocessing:
 
 ```text
 time_series_library/dataset/new_benchmarks/bci_vol/bci_amd_vol.csv
@@ -108,4 +108,4 @@ This writes the project-local benchmark files under:
 time_series_library/dataset/new_benchmarks/
 ```
 
-The generated CSVs and forecast caches are ignored by Git. For the standard experimental protocol, train each base forecaster first and export a deterministic `forecast_full.npz`; then run the conformal methods on the same cache.
+The regenerated CSV inputs are tracked for the paper protocol, while forecast caches remain ignored by Git. For the standard experimental protocol, train each base forecaster first and export a deterministic `forecast_full.npz`; then run the conformal methods on the same cache.
