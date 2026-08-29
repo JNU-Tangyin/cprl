@@ -31,7 +31,7 @@ DEFAULT_SERIES = [
     SeriesSpec("ETTm1", ROOT / "time_series_library/dataset/ETT-small/ETTm1.csv"),
     SeriesSpec("ETTm2", ROOT / "time_series_library/dataset/ETT-small/ETTm2.csv"),
     SeriesSpec("Weather", ROOT / "time_series_library/dataset/weather/weather.csv"),
-    SeriesSpec("Exchange", ROOT / "dataset/exchange_rate/exchange_rate.csv"),
+    SeriesSpec("Exchange", ROOT / "time_series_library/dataset/exchange_rate/exchange_rate.csv"),
     SeriesSpec(
         "BCI-AMD-Vol",
         ACP_ROOT / "Datasets/BCI/Variation of Local Fractional Coverage/AMD-fc.csv",

@@ -219,7 +219,10 @@ analysis_figures/
 experiment_logs/
 results_sanity*/
 results_cache_sanity*/
-results_ode_cmp*/
+results_cqr/
+results_cqr_qr/
+results_ode_cmp/
+results_ode_cmp_manual/
 forecast_cache_seed*/
 *.npz
 *.npy
@@ -229,11 +232,8 @@ forecast_cache_seed*/
 *.xls
 
 # Local benchmark data
-dataset/
+/dataset/
 Datasets/
-time_series_library/dataset/
-time_series_library/time_series_library/dataset/
-
 # Local archives and generated figures
 *.tgz
 *.tar.gz
@@ -259,18 +259,5 @@ AGENTS.md
 
 # Local experiment orchestration scripts
 scripts/remote_*.sh
-scripts/rerun_*
 scripts/wait_then_*
 scripts/run_exchange_rate_all_baselines.sh
-scripts/run_missing_targets_parallel.py
-scripts/run_new_dataset_baselines.py
-scripts/run_cache_export_remote.py
-
-# Forecast caches and derived result folders
-results_cqr/
-results_cqr_qr/
-results_ode_cmp/
-results_ode_cmp_manual/
-forecast_cache_seed*/
-*.npz
-*.xlsx

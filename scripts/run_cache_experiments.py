@@ -34,10 +34,10 @@ BASE_FORECASTERS = [
     "Transformer",
     "TSMixer",
 ]
-BASELINE_MODES = ["acp", "aci", "agaci", "dfpi", "spci", "hopcpt", "nex", "cpid", "bellman"]
+BASELINE_MODES = ["acp", "aci", "agaci", "dfpi", "hopcpt", "nex", "cpid", "bellman"]
 ABLATION_MODES = ["M0", "M1", "M2", "M3", "M4", "M5"]
 DATASET_PATHS = {
-    "exchange_rate": "dataset/exchange_rate/exchange_rate.csv",
+    "exchange_rate": "time_series_library/dataset/exchange_rate/exchange_rate.csv",
     "ETTh1": "time_series_library/dataset/ETT-small/ETTh1.csv",
     "ETTh2": "time_series_library/dataset/ETT-small/ETTh2.csv",
     "ETTm1": "time_series_library/dataset/ETT-small/ETTm1.csv",

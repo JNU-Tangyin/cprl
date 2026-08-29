@@ -221,7 +221,7 @@ def write_remote_code_commands(rows: list[DatasetRow], out_dir: Path, models: li
         "# AutoDL Forecast Cache Commands for /root/Code_副本",
         "",
         "Run from `/root/Code_副本`.",
-        "This uses the existing remote `run.py --export_forecast_cache` implementation.",
+        "This targets the external legacy Time-Series-Library environment, where forecast-cache export is exposed through `run.py --export_forecast_cache`; the CPRL repository entry point remains `run_exp.py`.",
         "Prepared CSVs should be uploaded under `dataset/new_benchmarks/`.",
         "",
     ]

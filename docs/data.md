@@ -10,7 +10,7 @@ ETT, Weather, and Exchange Rate are taken from the public Time-Series-Library be
 |---|---|---|
 | ETTh1, ETTh2, ETTm1, ETTm2 | THUML Time-Series-Library / TSLib datasets | `time_series_library/dataset/ETT-small/*.csv` |
 | Weather | THUML Time-Series-Library / TSLib datasets | `time_series_library/dataset/weather/weather.csv` |
-| Exchange Rate | THUML Time-Series-Library / TSLib datasets | `dataset/exchange_rate/exchange_rate.csv` |
+| Exchange Rate | THUML Time-Series-Library / TSLib datasets | `time_series_library/dataset/exchange_rate/exchange_rate.csv` |
 
 Useful links:
 
