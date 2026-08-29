@@ -11,7 +11,7 @@ This repository contains the experimental implementation for **CPRL**, a conform
 The main components are:
 
 - Regime-aware adaptive conformal calibration with spectral drift sensing.
-- Baselines including `aci`, `agaci`, `nex`, `cqr`, `dfpi`, `enbpi`, `cptc`, `hopcpt`, `spci`, `cpid`, and `bellman`.
+- Paper baseline comparisons including `aci`, `agaci`, `nex`, `dfpi`, `hopcpt`, `cpid`, and `bellman`.
 - Cache-based conformal evaluation from fixed base-forecaster predictions, which keeps CP comparisons independent of forecasting retraining noise.
 - Optional integration with forecasting architectures under `time_series_library/`.
 
@@ -104,7 +104,7 @@ Key arguments (commonly used):
 | `--train_ratio` | Proportion of data for training | `0.6` |
 | `--calib_ratio` | Proportion of data for calibration | `0.2` |
 | `--alpha` | Nominal significance level; target coverage = `1 - alpha` | `0.1` |
-| `--cp_mode` | CP method: `acp`, `aci`, `agaci`, `nex`, `cqr`, `dfpi`, `enbpi`, `cptc`, `hopcpt`, `spci`, `cpid`, `bellman` | `acp` |
+| `--cp_mode` | CP method used in the paper protocol: `acp`, `aci`, `agaci`, `nex`, `dfpi`, `hopcpt`, `cpid`, `bellman` | `acp` |
 | `--run_mode` | `online` or `offline` conformal evaluation | `online` |
 | `--results_dir` | Directory for numerical results | `./results` |
 
