@@ -115,11 +115,12 @@ class _SpectralDrift:
 
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray,
                       q: float) -> float:
-    """Weighted quantile with finite-sample correction.
+    """Drift-aware weighted empirical quantile.
 
-    Implements the weighted conformal quantile from Tibshirani et al. (2019)
-    Theorem 2.  The test point receives unit weight w_{n+1}=1, so the
-    effective quantile level is adjusted to  q · (1 + 1 / Σ w_i).
+    The weights used by ACP are spectral-similarity weights derived from
+    cumulative drift discrepancy, not covariate-shift likelihood ratios. This
+    routine is therefore an implementation-level weighted empirical quantile
+    rather than an exact finite-sample weighted conformal guarantee.
 
     Parameters
     ----------
@@ -129,7 +130,7 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray,
 
     Returns
     -------
-    float : the corrected weighted q-quantile.
+    float : the weighted empirical q-quantile.
     """
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
